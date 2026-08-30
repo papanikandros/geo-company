@@ -1,0 +1,28 @@
+# geoextract config — MVP (OSM-only)
+
+# === Region / Geography ===
+# pyrosm region name (region-qualified for Geofabrik subregions).
+region: "germany/hamburg"
+scope_name: "hamburg"          # used in output filenames
+
+crs_metric: "EPSG:32632"       # UTM 32N — area calculations in meters
+crs_output: "EPSG:4326"        # WGS84 — GeoJSON / lat-lng
+crs_map: "EPSG:3857"           # Web Mercator — parquet cache the Bokeh app reads
+
+# === Administrative levels (OSM admin_level) ===
+admin_levels:
+  state: "4"                   # Bundesland
+  district: "9"                # Hamburg Bezirke (city-state district equivalent; Landkreise are 6 elsewhere)
+
+# === OSM business tag filters (capture-all; NACE filtering happens downstream) ===
+osm_business_tags:
+  office: true
+  shop: true
+  craft: true
+  industrial: true
+
+# === Company grounds surface (Phase 4) ===
+landuse_values: [commercial, industrial, retail]
+
+# === Export ===
+formats: [csv, geojson, gpkg, parquet]
