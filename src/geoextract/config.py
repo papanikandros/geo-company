@@ -1,18 +1,261 @@
-"""Load and access the YAML config."""
+"""Plain-Python configuration constants (no YAML) — spec §A0.
+
+Everything tunable lives here: CRS regime, Geofabrik state URLs + aliases, OSM filters,
+dedup knobs, source priority, confidence weights, intrinsic industrial signals, release
+pins, sanity bounds.
+"""
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
+import os
 
-import yaml
+# --- CRS regime (spec §2) ---------------------------------------------------------------
+CRS_STORAGE = "EPSG:4326"   # internal storage, all *_4326 files, latitude/longitude
+CRS_METRIC = "EPSG:25832"   # ETRS89 / UTM 32N — all area/distance math
+CRS_MAP = "EPSG:3857"       # Web-Mercator map export + x/y columns
 
-DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "default.yaml"
+# --- Germany sanity bounds (spec §2) ----------------------------------------------------
+GERMANY_BBOX = (5.87, 47.27, 15.04, 55.06)  # lon_min, lat_min, lon_max, lat_max
+LAT_BOUNDS = (45.0, 56.0)
+LON_BOUNDS = (4.0, 17.0)
+AREA_MAX_M2 = 5e7           # grounds area sane range: (0, 5e7]
+
+# --- Geofabrik per-state PBFs (spec §4 #1) ----------------------------------------------
+GEOFABRIK_BASE = "https://download.geofabrik.de/europe/germany"
+
+# slug → official Bundesland name (OSM admin_level=4 `name`)
+STATES: dict[str, str] = {
+    "baden-wuerttemberg": "Baden-Württemberg",
+    "bayern": "Bayern",
+    "berlin": "Berlin",
+    "brandenburg": "Brandenburg",
+    "bremen": "Bremen",
+    "hamburg": "Hamburg",
+    "hessen": "Hessen",
+    "mecklenburg-vorpommern": "Mecklenburg-Vorpommern",
+    "niedersachsen": "Niedersachsen",
+    "nordrhein-westfalen": "Nordrhein-Westfalen",
+    "rheinland-pfalz": "Rheinland-Pfalz",
+    "saarland": "Saarland",
+    "sachsen": "Sachsen",
+    "sachsen-anhalt": "Sachsen-Anhalt",
+    "schleswig-holstein": "Schleswig-Holstein",
+    "thueringen": "Thüringen",
+}
+
+# any user-supplied spelling → slug (official names, license-plate codes, common shorthands)
+STATE_ALIASES: dict[str, str] = {
+    **{slug: slug for slug in STATES},
+    **{name.lower(): slug for slug, name in STATES.items()},
+    "bw": "baden-wuerttemberg",
+    "by": "bayern",
+    "be": "berlin",
+    "bb": "brandenburg",
+    "hb": "bremen",
+    "hh": "hamburg",
+    "he": "hessen",
+    "mv": "mecklenburg-vorpommern",
+    "ni": "niedersachsen",
+    "nds": "niedersachsen",
+    "nrw": "nordrhein-westfalen",
+    "nw": "nordrhein-westfalen",
+    "rp": "rheinland-pfalz",
+    "rlp": "rheinland-pfalz",
+    "sl": "saarland",
+    "sn": "sachsen",
+    "st": "sachsen-anhalt",
+    "sh": "schleswig-holstein",
+    "th": "thueringen",
+}
 
 
-def load_config(path: str | Path | None = None) -> dict[str, Any]:
-    """Load the YAML config (defaults to config/default.yaml)."""
-    path = Path(path) if path else DEFAULT_CONFIG
-    if not path.exists():
-        raise FileNotFoundError(f"config not found: {path}")
-    with open(path, encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
+def resolve_state(value: str) -> str:
+    """Any spelling of a Bundesland → Geofabrik slug. Raises on unknown."""
+    slug = STATE_ALIASES.get(value.strip().lower())
+    if slug is None:
+        raise ValueError(f"unknown state {value!r}; known: {', '.join(sorted(STATES))}")
+    return slug
+
+
+def geofabrik_url(slug: str) -> str:
+    return f"{GEOFABRIK_BASE}/{slug}-latest.osm.pbf"
+
+
+# --- IED installations (spec §B1, source catalogue #2) ----------------------------------
+# THRU.de EU-Registry workbook. The upload path is version-stamped — bump deliberately
+# when THRU.de publishes a new release.
+IED_URL = ("https://thru.de/wp-content/uploads/2026/04/"
+           "Anlagenliste_EU-Registry_gemaess_IE_RL_ab_2017.xlsx")
+IED_SHEET = "2017-2024_EUReg_Anlagen"
+IED_KEEP_STATUS = "In Betrieb (functional)"  # drop disused / decommissioned / notRegulated
+
+
+# --- Abwärme platform (spec §B2, source catalogue #3) -----------------------------------
+# BfEE waste-heat platform (EnEfG §17). The plain URL serves an HTML page; the
+# `__blob=publicationFile` variant serves the workbook. `v=` is the release — bump
+# deliberately.
+ABWAERME_URL = ("https://www.bfee-online.de/SharedDocs/Downloads/BfEE/DE/Effizienzpolitik/"
+                "pfa_datentabelle_excel.xlsx?__blob=publicationFile&v=28")
+ABWAERME_SHEET = "Abwärmepotentiale"
+
+# --- Overture Maps places theme (spec §B3, source catalogue #5) -------------------------
+# Monthly GeoParquet releases on public S3 (no auth), license CDLA-Permissive-2.0.
+# Pin the release — bump deliberately.
+OVERTURE_RELEASE = "2026-08-19.0"
+OVERTURE_S3 = (f"s3://overturemaps-us-west-2/release/{OVERTURE_RELEASE}"
+               "/theme=places/type=place/*")
+OVERTURE_MIN_CONFIDENCE = 0.5      # Overture's own conflation confidence; drops ~11 %
+GERMANY_BBOX = (5.5, 47.0, 15.5, 55.5)   # lon_min, lat_min, lon_max, lat_max
+
+# taxonomy root → contract business_type (pure mapping of Overture's own hierarchy —
+# no per-row classification; unmapped roots stay business_type=NA and are logged)
+OVERTURE_ROOT_TYPES = {
+    "shopping": "shop",
+    "retail": "shop",
+    "automotive": "shop",
+    "pets": "shop",
+    "beauty_and_spa": "shop",
+    "lifestyle_services": "shop",
+    "food_and_drink": "amenity",
+    "eat_and_drink": "amenity",
+    "health_care": "amenity",
+    "health_and_medical": "amenity",
+    "community_and_government": "amenity",
+    "public_service_and_government": "amenity",
+    "education": "amenity",
+    "arts_and_entertainment": "amenity",
+    "cultural_and_historic": "amenity",
+    "sports_and_recreation": "amenity",
+    "active_life": "amenity",
+    "attractions_and_activities": "amenity",
+    "travel_and_transportation": "amenity",
+    "lodging": "amenity",
+    "accommodation": "amenity",
+    "religious_organization": "amenity",
+    "services_and_business": "office",
+    "professional_services": "office",
+    "business_to_business": "office",
+    "financial_service": "office",
+    "financial_services": "office",
+    "real_estate": "office",
+    "mass_media": "office",
+    "home_service": "craft",
+    "home_services": "craft",
+    "industrial": "industrial",
+    "manufacturing": "industrial",
+}
+
+# --- Geocoding (spec §4.1) --------------------------------------------------------------
+# Public Nominatim by default; set NOMINATIM_URL for a self-hosted instance. Every
+# result is cached on disk — each address is fetched once, ever. Public endpoint
+# policy: ≤ 1 req/s, descriptive User-Agent, never > 10 k addresses.
+NOMINATIM_URL = os.environ.get("NOMINATIM_URL", "https://nominatim.openstreetmap.org")
+NOMINATIM_USER_AGENT = "geoextract/0.1 (EnergiaConsult company-extraction pipeline)"
+NOMINATIM_MIN_INTERVAL_S = 1.1
+# geocode_precision values that are too coarse to anchor dedup (spec §B2):
+GEOCODE_COARSE = {"postcode", "city"}
+GEOCODE_COARSE_CONFIDENCE_CAP = 0.3
+
+
+# --- OSM capture-all business filter (spec §A1) -----------------------------------------
+OSM_BUSINESS_FILTER: dict[str, bool | list[str]] = {
+    "office": True,
+    "shop": True,
+    "craft": True,
+    "industrial": True,
+    "amenity": [
+        "restaurant", "cafe", "fast_food", "bar", "pub", "biergarten", "food_court", "bank",
+        "pharmacy", "fuel", "car_wash", "car_rental", "driving_school", "veterinary",
+        "dentist", "doctors", "clinic", "hospital", "cinema", "theatre", "nightclub",
+        "marketplace", "post_office", "coworking_space", "internet_cafe", "ice_cream",
+        "casino", "childcare", "kindergarten", "language_school", "music_school", "recycling",
+    ],
+    "man_made": [
+        "works", "kiln", "chimney", "gasometer", "silo", "storage_tank", "pipeline",
+        "petroleum_well", "mineshaft", "wastewater_plant", "water_works", "pumping_station",
+    ],
+    "power": ["plant", "generator", "substation"],
+}
+
+# priority order when a feature carries several business keys — first present wins
+BUSINESS_KEYS = ["office", "shop", "craft", "industrial", "amenity", "man_made", "power"]
+BUSINESS_VALUE_BLACKLIST = {"no", "vacant"}
+
+WEBSITE_TAGS = ["website", "contact:website", "url"]
+PHONE_TAGS = ["phone", "contact:phone"]
+EMAIL_TAGS = ["email", "contact:email"]
+
+# landuse zones used for the grounds-area fallback (spec §A2) — not company records
+LANDUSE_ZONE_VALUES = ["commercial", "industrial", "retail"]
+
+# admin boundary levels (spec §A2)
+ADMIN_LEVEL_STATE = "4"
+ADMIN_LEVEL_DISTRICT = "6"
+
+# Geofabrik slug → official Bundesland name (the `state` contract column).
+SLUG_STATE_NAMES = {
+    "baden-wuerttemberg": "Baden-Württemberg", "bayern": "Bayern", "berlin": "Berlin",
+    "brandenburg": "Brandenburg", "bremen": "Bremen", "hamburg": "Hamburg",
+    "hessen": "Hessen", "mecklenburg-vorpommern": "Mecklenburg-Vorpommern",
+    "niedersachsen": "Niedersachsen", "nordrhein-westfalen": "Nordrhein-Westfalen",
+    "rheinland-pfalz": "Rheinland-Pfalz", "saarland": "Saarland", "sachsen": "Sachsen",
+    "sachsen-anhalt": "Sachsen-Anhalt", "schleswig-holstein": "Schleswig-Holstein",
+    "thueringen": "Thüringen",
+}
+
+# Official AGS state prefixes (first two digits of a Kreis AGS) → state name.
+# Fallback for states whose level-4 relation is broken/absent in the clipped PBF
+# (seen for Brandenburg and Sachsen-Anhalt in Geofabrik extracts).
+AGS_STATE_NAMES = {
+    "01": "Schleswig-Holstein", "02": "Hamburg", "03": "Niedersachsen", "04": "Bremen",
+    "05": "Nordrhein-Westfalen", "06": "Hessen", "07": "Rheinland-Pfalz",
+    "08": "Baden-Württemberg", "09": "Bayern", "10": "Saarland", "11": "Berlin",
+    "12": "Brandenburg", "13": "Mecklenburg-Vorpommern", "14": "Sachsen",
+    "15": "Sachsen-Anhalt", "16": "Thüringen",
+}
+
+# --- Entity resolution knobs (spec §A3) -------------------------------------------------
+DEDUP_DISTANCE_M = 50.0        # max distance for a match
+DEDUP_NAME_RATIO = 80.0        # rapidfuzz token_sort_ratio threshold
+DEDUP_POLYGON_NAME_RATIO = 60.0  # relaxed threshold when point lies inside other's polygon
+BLOCK_GRID_M = 100.0           # blocking grid cell size in EPSG:25832
+
+LEGAL_FORM_SUFFIXES = [
+    "gmbh & co. kg", "gmbh & co kg", "gmbh", "ag", "kg", "ohg", "ug",
+    "e.k.", "e.v.", "se", "gbr", "mbh", "inc", "ltd", "llc",
+]
+
+SOURCE_PRIORITY = ["osm", "ied", "abwaerme", "mastr", "overture", "fsq", "handelsregister"]
+
+# --- Confidence score weights (spec §5.4) -----------------------------------------------
+CONFIDENCE_WEIGHTS = {
+    "multi_source": 0.30,
+    "has_website": 0.15,
+    "has_address": 0.20,        # street + housenumber + postcode + city all present
+    "has_geometry_polygon": 0.15,
+    "has_phone": 0.10,
+    "has_grounds_area": 0.10,
+}
+
+# --- Intrinsic industrial signal (spec §6.5) --------------------------------------------
+INDUSTRIAL_SOURCES = {"ied", "abwaerme", "mastr"}
+INDUSTRIAL_TAGS: dict[str, set[str]] = {
+    "landuse": {"industrial", "quarry", "port", "depot", "railway", "landfill"},
+    "man_made": {
+        "works", "kiln", "chimney", "gasometer", "silo", "storage_tank", "pipeline",
+        "petroleum_well", "mineshaft", "wastewater_plant", "water_works", "pumping_station",
+    },
+    "industrial": {"factory", "oil", "mine", "warehouse", "port", "scrap_yard",
+                   "slaughterhouse", "depot"},
+    "power": {"plant", "generator", "substation"},
+    "craft": {"metal_construction", "electronics", "joinery"},
+}
+INDUSTRIAL_NACE_SECTIONS = {"B", "C", "D", "E", "F"}
+
+# (Overture release pin lives with the B3 constants above.)
+
+# --- Attribution (spec §11) -------------------------------------------------------------
+ATTRIBUTION = (
+    "© OpenStreetMap contributors (ODbL); Overture Maps (CDLA-P-2.0); "
+    "Foursquare OS Places (Apache-2.0); Destatis/BNetzA/BfEE (DL-DE-BY-2.0)"
+)
+LICENCE_NOTE = "merged table is an ODbL derivative database"

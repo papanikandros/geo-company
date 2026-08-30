@@ -1,4 +1,8 @@
-"""Write outputs: CSV, GeoJSON, GeoPackage, EPSG:3857 GeoParquet (map cache) + summary."""
+"""Write the merged Company table: 4326 + 3857 parquets and the summary JSON — spec §A4.
+
+The `*_3857` map file carries point geometry only plus scalar x/y columns (the map reads
+x/y, not shapely geometries). The `*_4326` file keeps full geometry for downstream work.
+"""
 from __future__ import annotations
 
 import datetime as _dt
@@ -8,88 +12,67 @@ from pathlib import Path
 import geopandas as gpd
 import pandas as pd
 
-from .models import EXPORT_COLUMNS
-
-ATTRIBUTION = "© OpenStreetMap contributors, ODbL (https://www.openstreetmap.org/copyright)"
+from . import config, paths
 
 
-def _flat(gdf: gpd.GeoDataFrame) -> pd.DataFrame:
-    """Attribute frame for vector/CSV formats (list columns serialized to strings)."""
-    df = pd.DataFrame({c: gdf[c] if c in gdf.columns else None for c in EXPORT_COLUMNS})
-    df["nace_codes"] = df["nace_codes"].apply(
-        lambda v: ";".join(v) if isinstance(v, list) else ("" if v is None else str(v))
+def write_merged(gdf: gpd.GeoDataFrame, data_root: Path, scope: str) -> list[Path]:
+    p4326 = paths.merged_parquet(data_root, scope, "4326")
+    gdf.to_crs(config.CRS_STORAGE).to_parquet(p4326)
+
+    pts = gdf.geometry.representative_point().to_crs(config.CRS_MAP)
+    map_gdf = gpd.GeoDataFrame(
+        pd.DataFrame(gdf.drop(columns="geometry")), geometry=pts.values, crs=config.CRS_MAP
     )
-    return df
+    map_gdf["x"] = pts.x.to_numpy()
+    map_gdf["y"] = pts.y.to_numpy()
+    p3857 = paths.merged_parquet(data_root, scope, "3857")
+    map_gdf.to_parquet(p3857)
+    return [p4326, p3857]
 
 
-def export(gdf: gpd.GeoDataFrame, out_dir, scope: str, formats: list[str], config: dict) -> list[Path]:
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    date = _dt.date.today().strftime("%Y%m%d")
-    stem = f"{scope}_companies_{date}"
-    written: list[Path] = []
-
-    flat = _flat(gdf)
-
-    if "csv" in formats:
-        p = out_dir / f"{stem}.csv"
-        flat.to_csv(p, index=False, encoding="utf-8")
-        written.append(p)
-
-    if "geojson" in formats or "gpkg" in formats:
-        vec = gpd.GeoDataFrame(flat.copy(), geometry=gdf.geometry.values, crs=gdf.crs).to_crs(
-            config["crs_output"]
-        )
-        if "geojson" in formats:
-            p = out_dir / f"{stem}.geojson"
-            vec.to_file(p, driver="GeoJSON")
-            written.append(p)
-        if "gpkg" in formats:
-            p = out_dir / f"{stem}.gpkg"
-            vec.to_file(p, driver="GPKG", layer="companies")
-            written.append(p)
-
-    if "parquet" in formats:
-        # Map cache: point geometry in Web Mercator + x/y columns (app convention).
-        pts = gdf["_rep"].to_crs(config["crs_map"])
-        cache = gpd.GeoDataFrame(
-            pd.DataFrame({c: gdf[c] if c in gdf.columns else None for c in EXPORT_COLUMNS}),
-            geometry=pts.values, crs=config["crs_map"],
-        )
-        cache["x"] = pts.x.values
-        cache["y"] = pts.y.values
-        p = out_dir / f"{stem}_3857.parquet"
-        cache.to_parquet(p)
-        written.append(p)
-
-    _write_summary(gdf, out_dir / f"{scope}_summary_{date}.json", scope, config)
-    written.append(out_dir / f"{scope}_summary_{date}.json")
-    (out_dir / "ATTRIBUTION.txt").write_text(ATTRIBUTION + "\n", encoding="utf-8")
-    return written
-
-
-def _write_summary(gdf, path: Path, scope: str, config: dict) -> None:
-    n = len(gdf)
-    area = pd.to_numeric(gdf["grounds_area_m2"], errors="coerce").dropna()
-    summary = {
-        "generated_at": _dt.datetime.now(_dt.UTC).isoformat(),
-        "scope": scope,
-        "region": config.get("region"),
-        "sources_used": ["osm"],
-        "total_companies": n,
-        "field_coverage": {
-            "has_website": int(gdf["website"].notna().sum()),
-            "has_phone": int(gdf["phone"].notna().sum()),
-            "has_full_address": int(gdf["address_full"].notna().sum()),
-            "has_grounds_area": int(area.shape[0]),
-        },
-        "by_business_type": gdf["business_type"].value_counts(dropna=True).to_dict(),
-        "by_grounds_source": gdf["grounds_area_source"].value_counts(dropna=True).to_dict(),
-        "grounds_area_m2": {
-            "min": round(float(area.min()), 1) if len(area) else None,
-            "median": round(float(area.median()), 1) if len(area) else None,
-            "max": round(float(area.max()), 1) if len(area) else None,
-        },
-        "attribution": ATTRIBUTION,
+def _dist(series: pd.Series) -> dict:
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if not len(s):
+        return {"count": 0}
+    return {
+        "count": len(s),
+        "min": round(float(s.min()), 1),
+        "p25": round(float(s.quantile(0.25)), 1),
+        "median": round(float(s.median()), 1),
+        "p75": round(float(s.quantile(0.75)), 1),
+        "max": round(float(s.max()), 1),
     }
-    path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def write_summary(
+    gdf: gpd.GeoDataFrame, data_root: Path, scope: str,
+    pbf_meta: dict[str, dict] | None = None, runtimes_s: dict[str, float] | None = None,
+) -> Path:
+    n = len(gdf)
+    coverage_cols = ["name", "website", "phone", "email", "address_full",
+                     "grounds_area_m2", "district_ags", "nace_primary"]
+    summary = {
+        "generated_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+        "scope": scope,
+        "total_companies": n,
+        "by_state": gdf["state"].value_counts(dropna=True).to_dict(),
+        "by_business_type": gdf["business_type"].value_counts(dropna=True).to_dict(),
+        "by_source": gdf["source"].value_counts(dropna=True).to_dict(),
+        "multi_source_clusters": int((gdf["source_count"] >= 2).sum()),
+        "is_industrial": int(gdf["is_industrial"].fillna(False).sum()),
+        "field_coverage": {
+            c: {"count": int(gdf[c].notna().sum()),
+                "share": round(float(gdf[c].notna().mean()), 3)}
+            for c in coverage_cols if c in gdf.columns
+        },
+        "grounds_area_m2": _dist(gdf["grounds_area_m2"]),
+        "confidence_score_mean": round(
+            float(pd.to_numeric(gdf["confidence_score"], errors="coerce").mean()), 3),
+        "pbf_files": pbf_meta or {},
+        "runtimes_s": {k: round(v, 1) for k, v in (runtimes_s or {}).items()},
+        "attribution": config.ATTRIBUTION,
+        "licence_note": config.LICENCE_NOTE,
+    }
+    dest = paths.summary_json(data_root, scope)
+    dest.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    return dest

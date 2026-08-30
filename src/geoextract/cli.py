@@ -1,70 +1,72 @@
-"""geoextract CLI — OSM-only MVP."""
+"""geoextract CLI: extract | classify | export | run — spec §A4/§C6.
+
+`classify` lands with Part C; until then it exits with a clear message.
+"""
 from __future__ import annotations
 
-import time
-from pathlib import Path
-
-import click
-from pyrosm import OSM
-
-from .area import compute_grounds_area
-from .config import load_config
-from .download import download_pbf
-from .export import export
-from .extract_osm import assign_admin, extract_businesses
+import argparse
+import sys
 
 
-@click.group()
-def main() -> None:
-    """Extract German companies from open geodata."""
+def _add_common(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--data-dir", default=None,
+                   help="data root (default: $GEOEXTRACT_DATA_DIR or ./data)")
 
 
-@main.command()
-@click.option("--config", "config_path", default=None, help="Path to config YAML.")
-@click.option("--region", default=None, help="pyrosm region (overrides config), e.g. germany/hamburg.")
-@click.option("--data-dir", default="./data", help="Where PBF downloads land.")
-@click.option("--output-dir", default="./output", help="Where outputs are written.")
-@click.option("--formats", default=None, help="Comma-separated: csv,geojson,gpkg,parquet.")
-@click.option("--skip-download", is_flag=True, help="Use an existing PBF in --data-dir.")
-def run(config_path, region, data_dir, output_dir, formats, skip_download) -> None:
-    """Run the full OSM-only pipeline: download → extract → grounds area → export."""
-    cfg = load_config(config_path)
-    if region:
-        cfg["region"] = region
-        cfg["scope_name"] = region.split("/")[-1]
-    if formats:
-        cfg["formats"] = [f.strip() for f in formats.split(",")]
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="geoextract",
+        description="Bottom-up extraction of German companies from open geodata.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
 
-    t0 = time.time()
-    region = cfg["region"]
-    click.echo(f"[1/5] PBF for {region!r} …")
-    if skip_download:
-        # pyrosm caches as <name>-latest.osm.pbf in data_dir
-        pbf = Path(data_dir) / f"{region.split('/')[-1]}-latest.osm.pbf"
-        if not pbf.exists():
-            raise click.ClickException(f"--skip-download but {pbf} not found")
-    else:
-        pbf = download_pbf(region, data_dir)
-    click.echo(f"      {pbf}")
+    p_extract = sub.add_parser("extract", help="companies from geodata → canonical table")
+    p_extract.add_argument("--states", default="bremen",
+                           help='comma-separated Bundesländer (names or codes), or "all"')
+    p_extract.add_argument("--sources", default="osm,ied,abwaerme,overture",
+                           help="comma-separated sources (osm,ied,abwaerme,overture,…)")
+    p_extract.add_argument("--skip-download", action="store_true",
+                           help="fail instead of downloading missing PBFs")
+    _add_common(p_extract)
 
-    osm = OSM(str(pbf))
+    p_classify = sub.add_parser("classify", help="websites/tags/registers → NACE codes")
+    p_classify.add_argument("--scope", default="bremen")
+    p_classify.add_argument("--mode", choices=["ai", "traditional"], default="ai")
+    p_classify.add_argument("--limit", type=int, default=None)
+    p_classify.add_argument("--industrial-only", action="store_true")
+    _add_common(p_classify)
 
-    click.echo("[2/5] extract businesses …")
-    gdf = extract_businesses(osm, cfg)
-    click.echo(f"      {len(gdf)} businesses")
+    p_export = sub.add_parser("export", help="map parquet (EPSG:3857) + summary JSON")
+    p_export.add_argument("--scope", default="bremen")
+    _add_common(p_export)
 
-    click.echo("[3/5] spatial join admin boundaries …")
-    gdf = assign_admin(gdf, osm, cfg)
+    p_run = sub.add_parser("run", help="chain extract → classify → export")
+    p_run.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
+    p_run.add_argument("--sources", default="osm,ied,abwaerme,overture")
+    _add_common(p_run)
 
-    click.echo("[4/5] compute grounds area …")
-    gdf = compute_grounds_area(gdf, osm, cfg)
+    return parser
 
-    click.echo("[5/5] export …")
-    written = export(gdf, output_dir, cfg["scope_name"], cfg["formats"], cfg)
-    for p in written:
-        click.echo(f"      → {p}")
-    click.echo(f"done in {time.time() - t0:.1f}s")
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    if args.command == "extract":
+        from .pipeline import run_extract
+        return run_extract(states=args.states, sources=args.sources,
+                           data_dir=args.data_dir, skip_download=args.skip_download)
+    if args.command == "export":
+        from .pipeline import run_export
+        return run_export(scope=args.scope, data_dir=args.data_dir)
+    if args.command == "run":
+        from .pipeline import run_all
+        return run_all(scope=args.scope, sources=args.sources, data_dir=args.data_dir)
+    if args.command == "classify":
+        print("geoextract classify is Part C — not implemented yet (see GEOEXTRACT_SPEC.md).",
+              file=sys.stderr)
+        return 2
+    return 2
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
