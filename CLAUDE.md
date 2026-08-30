@@ -93,3 +93,28 @@ Apache-2.0, German agency data (BfEE/BNetzA/Destatis/thru.de) DL-DE-BY-2.0.
 Handelsregister ≤ 60 req/h; public Nominatim 1 req/s with User-Agent + caching. Scraping for
 classification: respect robots.txt, 1 req/s per domain, max home + 5 internal pages,
 business emails only (GDPR).
+
+## Golden working rules (user-imposed — NEVER violate)
+
+1. **Never run `git commit`** — the user makes every commit; Claude may stage and prepare
+   messages (`.commit-messages/`) only.
+2. **Never implement anything without the user's explicit go** — plan/propose first.
+3. **Never start any download on your own initiative** — retries/resumes/recovery included.
+   The connection is METERED (~25 GB/month); state the expected volume and ask first.
+   Beware library auto-downloads: open-mastr re-downloads AND DELETES its cache dir
+   (`~/.open-MaStR/data/xml_download/`) when its date-derived zip name is missing — always
+   pin `date=` and keep a `.bak` of the export outside that dir.
+4. Spell out every abbreviation on first use.
+
+## Status snapshot (2026-08-29 — details in Claude's project memory)
+
+- A0–A5 + B1 (IED) + B2 (Abwärme/PfA) + B3 (Overture) done: DE table 4 083 494 companies,
+  4 sources, 320 726 multi-source clusters. B4 (Foursquare) deferred as redundant.
+- **B5 (MaStR): code complete + tested; DATA MISSING** — one verified 3.16 GB fetch of
+  `Gesamtdatenexport_20260827` pending user go. Fetch: `data/raw/mastr/segfetch3.sh`
+  (proven; only-206 + CRC-verified). Parse: `data/raw/mastr/download_probe.py`
+  (date-pinned). Open question: `business_type` for consumer-only sites.
+- Git: repo intentionally at ZERO commits (user is rewriting the baseline message);
+  agreed commit split lives in Claude's memory (`git-recommit-plan`).
+- Canonical preview: `data/previews/companies_merged_DE_industrial.html` — full data,
+  never sampled, currently `--states hamburg,schleswig-holstein`; per-dataset toggle rows.

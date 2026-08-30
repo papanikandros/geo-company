@@ -12,16 +12,16 @@ conventions. Nothing in this file depends on having access to the ensynergies re
 >
 > | Phase | Status | Date | Artifact / note |
 > |---|---|---|---|
-> | A0 Scaffolding | ☐ | | |
-> | A1 OSM extraction (one state) | ☐ | | (ensynergies already has a Bremen MVP: 10 418 companies, ~40 % with website) |
-> | A2 Boundaries + area | ☐ | | |
-> | A3 Entity resolution | ☐ | | |
-> | A4 Export + CLI | ☐ | | |
-> | A5 OSM all 16 states | ☐ | | |
-> | B1 IED adapter | ☐ | | |
-> | B2 Abwärme adapter | ☐ | | |
-> | B3 Overture adapter | ☐ | | |
-> | B4 FSQ OS Places adapter | ☐ | | |
+> | A0 Scaffolding | ☑ | 2026-08-25 | package `geoextract` (argparse CLI), `schema.py` contract + `conform`/`validate_frame`, plain-Python `config.py`, `paths.py`; 7 tests green |
+> | A1 OSM extraction (one state) | ☑ | 2026-08-25 | Bremen: 11 358 businesses, 37 % with website, 14 s (DoD: ≥9 000 / ≥35 % / <5 min) |
+> | A2 Boundaries + area | ☑ | 2026-08-25 | Bremen: district_ags 99.5 % (04011/04012), industrial median area 14 500 m²; own_polygon 2 257 / landuse_zone 4 962 rows |
+> | A3 Entity resolution | ☑ | 2026-08-25 | Bremen OSM: 11 358 → 11 247 (99 clusters, all same-site node/way duplicates, largest checked by hand); 8 synthetic-duplicate tests; cross-source spot-check re-runs after B1/B2 |
+> | A4 Export + CLI | ☑ | 2026-08-25 | `geoextract extract --states bremen` end-to-end → `companies_merged_bremen_{4326,3857}.parquet` + summary; preview HTML verified; §6.5 intrinsic is_industrial (1 253 rows) |
+> | A5 OSM all 16 states | ☑ | 2026-08-25 | DE: 1 874 840 raw → 1 774 691 companies (83 375 duplicate ids from overlapping Geofabrik extracts dropped, e.g. Berlin ⊂ Brandenburg PBF); state coverage 99.3 % (AGS-prefix fallback for broken BB/ST level-4 relations); 2 offshore OOB features dropped loudly; extraction ≤ 46 s/state, merge ~13 min; sampled preview (100 k) verified |
+> | B1 IED adapter | ☑ | 2026-08-25 | THRU.de 2026-04 workbook, Berichtsjahr 2024: 12 816 functional IED installations → 10 302 entities after A3 (2 514 same-site collapses); 857 ied+osm clusters DE-wide (8 %), Bremen clusters hand-verified, 0 false merges; resolver fixed en route (footprint blocking + containment threshold regardless of distance); `--sources` defaults to `osm,ied` |
+> | B2 Abwärme adapter | ☑ | 2026-08-25 | BfEE v28: 23 936 potentials → 6 178 sites (3 659 companies) → geocoded via cached Nominatim §4.1 (72 % house / 20 % street / 341 coarse / 192 dropped) → 5 986 sites; DE merge: 979 of 5 932 abwaerme entities matched (17 %), 150 three-source clusters (abwaerme+ied+osm), coarse rows never merge + confidence ≤ 0.3 ✓; 201 TWh/a waste heat geolocated; Bremen clusters hand-verified incl. first triple (Mercedes-Benz) |
+> | B3 Overture adapter | ☑ | 2026-08-27 | release 2026-08-19.0 via DuckDB/S3: 2 630 706 named DE places (confidence ≥ 0.5) → DE merge 4 524 348 raw → 4 083 494 companies in ~43 min; 319 906 overture clusters (12 % match), 100 four-source (first: Mercedes-Benz Werk Bremen); name 61→83 %, website 26→65 %; Bremen hand-verified (2 806 clusters, 0 false merges); `--sources` defaults to `osm,ied,abwaerme,overture`; preview OVT row (provenance filters) verified |
+> | B4 FSQ OS Places adapter | ⊘ deferred | 2026-08-27 | likely redundant: FSQ is an Overture conflation input (25 % of our overture rows carry FSQ provenance; same category taxonomy, so no industrial gain — check-in data is thinnest exactly there); public S3 parquet withdrawn (bucket holds only LICENSE — access now gated: Places Portal Iceberg + token, or gated HF). Revisit only with a portal token + Bremen diff probe |
 > | B5 MaStR adapter | ☐ | | |
 > | B6 Handelsregister (optional) | ☐ | | |
 > | C1 NACE reference data | ☐ | | |
@@ -372,15 +372,24 @@ DuckDB: `SELECT … FROM read_parquet('s3://overturemaps-us-west-2/release/{rele
 WHERE bbox.xmin BETWEEN … ` per state bbox; map `categories.primary` → `business_type`
 via a bundled lookup; `websites[0]`, `phones[0]`, `addresses[0]`. `id="ovt_"+id`.
 
-### B4 Foursquare OS Places (`sources/fsq.py`)
-Same pattern (`s3://fsq-os-places-us-east-1/release/dt=…/places/parquet/*`), drop rows with
-`date_closed`, join `fsq_category_ids` → labels via the bundled categories parquet.
+### B4 Foursquare OS Places (`sources/fsq.py`) — DEFERRED 2026-08-27, likely redundant
+FSQ is already an Overture conflation input (25 % of our overture rows carry FSQ
+provenance) and Overture's category taxonomy is FSQ-derived, so a standalone ingest adds
+mainly the rows Overture's conflation rejected (stale check-in venues) and nothing for
+industrial coverage. The public S3 parquet (`s3://fsq-os-places-us-east-1/release/dt=…`)
+was withdrawn — access is now gated (Places Portal Iceberg catalog + token, or gated
+Hugging Face). Revisit only with a portal token and a Bremen diff probe first.
 
 ### B5 MaStR (`sources/mastr.py`)
 `open-mastr` bulk download → units with `Lage`/coordinates; keep technologies
 `{Verbrennung, Biomasse, Wind, Wasser, Geothermie, Solarthermie, Speicher}` and PV only if
 `Bruttoleistung ≥ 100 kW`; operator name → `name`; `business_type=power`,
 `business_subtype=generator|plant`; capacity kept as debug `mastr_kw`.
+Amendments (2026-08-27, user-approved): **Speicher also only ≥ 100 kW** (the register now
+holds 2.76 M storage units, dominated by home batteries — unfiltered they would drown the
+table); **drop `(natürliche Person)` operators unconditionally** (anonymized private
+persons are not companies; also removes most small PV). Aggregate units → one row per
+(operator, Lokation) with summed `mastr_kw`; units in operation only.
 
 ### B6 Handelsregister (optional, `--include-hr`)
 Per PLZ in scope, ≤ 60 req/h, parse name / legal form / register number / court / seat →
