@@ -12,6 +12,7 @@ from . import area, boundaries, config, download, export, paths, resolve
 from .sources import abwaerme as abwaerme_source
 from .sources import ied as ied_source
 from .sources import osm as osm_source
+from .sources import mastr as mastr_source
 from .sources import overture as overture_source
 
 
@@ -113,7 +114,7 @@ def run_extract(states: str, sources: str, data_dir=None, skip_download: bool = 
     pbf_meta: dict[str, dict] = {}
 
     for src in source_list:
-        if src not in ("osm", "ied", "abwaerme", "overture"):
+        if src not in ("osm", "ied", "abwaerme", "overture", "mastr"):
             print(f"[warn] source {src!r} is Part B — not implemented yet, skipping")
 
     frames: list[gpd.GeoDataFrame] = []
@@ -173,6 +174,17 @@ def run_extract(states: str, sources: str, data_dir=None, skip_download: bool = 
             frames.append(ovt)
         runtimes["extract_overture"] = time.time() - t0
         pbf_meta["overture"] = {"release": config.OVERTURE_RELEASE}
+    if "mastr" in source_list:
+        t0 = time.time()
+        mst = mastr_source.extract_mastr(data_root)
+        if scope != "DE":   # register carries Bundesland → direct state subset
+            wanted = {config.SLUG_STATE_NAMES[s] for s in slugs}
+            mst = mst[mst["state"].isin(wanted)].reset_index(drop=True)
+            print(f"[mastr] state subset {sorted(wanted)}: {len(mst)} sites")
+        if len(mst):
+            frames.append(mst)
+        runtimes["extract_mastr"] = time.time() - t0
+        pbf_meta["mastr"] = {"db": str(config.MASTR_DB)}
     if not frames:
         raise SystemExit("nothing extracted — no implemented source requested")
 

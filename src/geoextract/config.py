@@ -144,6 +144,65 @@ OVERTURE_ROOT_TYPES = {
     "manufacturing": "industrial",
 }
 
+# --- MaStR — Marktstammdatenregister (spec §B5, source catalogue #6) --------------------
+# BNetzA bulk export via open-mastr into data/raw/mastr/mastr.db (sqlite). Units in
+# operation only; operators that are natural persons are dropped (anonymized, not
+# companies — user-approved amendment 2026-08-27). Unit rows aggregate to one site per
+# (operator, Lokation).
+MASTR_DB = "raw/mastr/mastr.db"            # relative to the data root
+MASTR_MIN_PV_KW = 100.0                    # spec §B5: PV only ≥ 100 kW
+MASTR_MIN_STORAGE_KW = 100.0               # amendment 2026-08-27: same rule for Speicher
+# All other generation tables: MaStR publishes exact coordinates only from 50 kW upward
+# (verified on the 2026-08-27 export: 100 % coordinate completeness ≥ 50 kW for every
+# technology, 0 % below 30 kW). Sub-50 kW units are private households, not companies
+# (user decision 2026-08-31). Consumer tables (gas/electricity) stay unfiltered.
+MASTR_MIN_KW = 50.0
+# Coordinate plausibility (acceptance checks 2026-08-31, after Kotthoff/Tepe et al. 2023):
+# a unit coordinate farther than MASTR_DISTRICT_MISMATCH_KM outside its declared Landkreis
+# (VG5000 polygon buffered by MASTR_DISTRICT_BUFFER_DEG, like the reference test) or outside
+# the LAT/LON sanity bounds is treated as missing → address geocode, provenance flagged.
+MASTR_DISTRICTS_SHP = "raw/vg5000/vg5000_ebenen_1231/VG5000_KRS.shp"   # BKG, DL-DE-BY-2.0
+MASTR_DISTRICT_BUFFER_DEG = 0.015
+MASTR_DISTRICT_MISMATCH_KM = 10.0
+# business_type from the OPERATOR's registered economic activity (WZ section label in
+# market_actors, 80.8 % coverage) — user decision 2026-09-01: a steelworks with an on-site
+# power plant is industrial, not power. Keyword match on the section label (robust against
+# the WZ 2008 → WZ 2025 letter shift), first hit wins; no hit → technology rule
+# (consumer-only → industrial, else power).
+MASTR_WZ_KEYWORD_TO_BUSINESS_TYPE: list[tuple[str, str]] = [
+    ("energieversorgung", "power"),
+    ("verarbeitendes gewerbe", "industrial"),
+    ("bergbau", "industrial"),
+    ("wasserversorgung", "industrial"),           # water, sewage, waste
+    ("land- und forstwirtschaft", "industrial"),  # no agriculture value in the vocabulary
+    ("verkehr und lagerei", "industrial"),        # transport & logistics depots
+    ("baugewerbe", "craft"),
+    ("handel", "shop"),
+    ("gastgewerbe", "amenity"),
+    ("gesundheits", "amenity"),
+    ("erziehung", "amenity"),
+    ("kunst", "amenity"),
+    ("sport", "amenity"),
+    ("abschnitt", "office"),                      # every remaining service/admin section
+]
+# open-mastr unit tables to read (technology → business_subtype value).
+# nuclear keeps ALL operating statuses (fleet shut down since 2023 — the sites and
+# their operators still exist; user decision 2026-08-27); everything else In Betrieb only.
+MASTR_TABLES = {
+    "wind_extended": "wind",
+    "solar_extended": "solar",
+    "biomass_extended": "biomass",
+    "hydro_extended": "hydro",
+    "storage_extended": "storage",
+    "combustion_extended": "combustion",
+    "gsgk_extended": "geothermal",         # Geothermie/Grubengas/Druckentspannung
+    "nuclear_extended": "nuclear",
+    "gas_producer": "gas_production",
+    "gas_consumer": "gas_consumption",     # large industrial gas consumers
+    "gas_storage_extended": "gas_storage",
+    "electricity_consumer": "electricity_consumption",  # large industrial consumers
+}
+
 # --- Geocoding (spec §4.1) --------------------------------------------------------------
 # Public Nominatim by default; set NOMINATIM_URL for a self-hosted instance. Every
 # result is cached on disk — each address is fetched once, ever. Public endpoint

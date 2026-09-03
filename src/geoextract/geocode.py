@@ -112,12 +112,14 @@ class Geocoder:
         return result
 
     def _lookup(self, street: str, postcode: str, city: str) -> GeocodeResult:
-        # 1. full structured address → house / street
-        rows = self._request({"street": street, "postalcode": postcode, "city": city})
-        if rows:
-            addresstype = str(rows[0].get("addresstype", ""))
-            precision = "house" if addresstype not in _STREET_TYPES else "street"
-            return self._result(rows[0], precision)
+        # 1. full structured address → house / street (skipped without a street: a
+        #    postcode/town-only query must never be labelled house precision)
+        if street:
+            rows = self._request({"street": street, "postalcode": postcode, "city": city})
+            if rows:
+                addresstype = str(rows[0].get("addresstype", ""))
+                precision = "house" if addresstype not in _STREET_TYPES else "street"
+                return self._result(rows[0], precision)
         # 2. postcode + city → postcode centroid
         rows = self._request({"postalcode": postcode, "city": city})
         if rows:

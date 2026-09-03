@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_extract = sub.add_parser("extract", help="companies from geodata → canonical table")
     p_extract.add_argument("--states", default="bremen",
                            help='comma-separated Bundesländer (names or codes), or "all"')
-    p_extract.add_argument("--sources", default="osm,ied,abwaerme,overture",
+    p_extract.add_argument("--sources", default="osm,ied,abwaerme,overture,mastr",
                            help="comma-separated sources (osm,ied,abwaerme,overture,…)")
     p_extract.add_argument("--skip-download", action="store_true",
                            help="fail instead of downloading missing PBFs")
@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="chain extract → classify → export")
     p_run.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
-    p_run.add_argument("--sources", default="osm,ied,abwaerme,overture")
+    p_run.add_argument("--sources", default="osm,ied,abwaerme,overture,mastr")
     _add_common(p_run)
 
     return parser

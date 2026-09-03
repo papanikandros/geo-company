@@ -22,7 +22,7 @@ conventions. Nothing in this file depends on having access to the ensynergies re
 > | B2 Abwärme adapter | ☑ | 2026-08-25 | BfEE v28: 23 936 potentials → 6 178 sites (3 659 companies) → geocoded via cached Nominatim §4.1 (72 % house / 20 % street / 341 coarse / 192 dropped) → 5 986 sites; DE merge: 979 of 5 932 abwaerme entities matched (17 %), 150 three-source clusters (abwaerme+ied+osm), coarse rows never merge + confidence ≤ 0.3 ✓; 201 TWh/a waste heat geolocated; Bremen clusters hand-verified incl. first triple (Mercedes-Benz) |
 > | B3 Overture adapter | ☑ | 2026-08-27 | release 2026-08-19.0 via DuckDB/S3: 2 630 706 named DE places (confidence ≥ 0.5) → DE merge 4 524 348 raw → 4 083 494 companies in ~43 min; 319 906 overture clusters (12 % match), 100 four-source (first: Mercedes-Benz Werk Bremen); name 61→83 %, website 26→65 %; Bremen hand-verified (2 806 clusters, 0 false merges); `--sources` defaults to `osm,ied,abwaerme,overture`; preview OVT row (provenance filters) verified |
 > | B4 FSQ OS Places adapter | ⊘ deferred | 2026-08-27 | likely redundant: FSQ is an Overture conflation input (25 % of our overture rows carry FSQ provenance; same category taxonomy, so no industrial gain — check-in data is thinnest exactly there); public S3 parquet withdrawn (bucket holds only LICENSE — access now gated: Places Portal Iceberg + token, or gated HF). Revisit only with a portal token + Bremen diff probe |
-> | B5 MaStR adapter | ☐ | | |
+> | B5 MaStR adapter | ☑ | 2026-09-03 | Gesamtdatenexport_20260827 (3.16 GB, CRC-verified segmented fetch; parse 56 min → 11 GB sqlite) → 134 526 legal-entity units ≥ floors → 102 382 sites (59 186 operators); kW floor ≥ 50 kW all techs (PV/Speicher ≥ 100 kW = MaStR coordinate-publication thresholds); acceptance checks (port of verify-marktstammdaten) replicate Kotthoff/Tepe 2023: 3.07 % onshore wind outside declared Landkreis, coords wind 96.8 %/PV 4.1 %/storage 0.2 %; 848 implausible unit coords → address geocode (provenance mastr_coord_method), 292 street-less sites PLZ+town-only (never dedup anchors); business_type via operator WZ section (81 % coverage, ArcelorMittal/BASF/Mercedes → industrial); DE merge 4 626 730 raw → **4 164 518 companies**, 327 695 multi-source clusters, 9 914 mastr rows merged (10.9 %), **60 five-source clusters** (first: Dold Holzwerke, Schwarzwaldmilch, Badische Stahlwerke); Bremen 384 sites hand-verified; grid layer 263 863 connection points; `--sources` default += mastr |
 > | B6 Handelsregister (optional) | ☐ | | |
 > | C1 NACE reference data | ☐ | | |
 > | C2 Website scraper | ☐ | | |
@@ -390,6 +390,39 @@ holds 2.76 M storage units, dominated by home batteries — unfiltered they woul
 table); **drop `(natürliche Person)` operators unconditionally** (anonymized private
 persons are not companies; also removes most small PV). Aggregate units → one row per
 (operator, Lokation) with summed `mastr_kw`; units in operation only.
+Amendments (2026-08-31 / 2026-09-01, user-approved after the acceptance checks on the
+`Gesamtdatenexport_20260827` parse — `scripts/mastr_acceptance_checks.py`, a port of
+Kotthoff/Tepe et al. 2023 `verify-marktstammdaten`; results replicate the paper: 3.07 % of
+onshore wind outside its declared Landkreis, coordinate completeness wind 96.8 % / PV 4.1 % /
+storage 0.2 %, unit→Lokation inflation 1.36×):
+- **kW floor for all generation technologies: `Bruttoleistung ≥ 50 kW`** (`MASTR_MIN_KW`;
+  PV + Speicher keep ≥ 100 kW). MaStR publishes exact coordinates only from 50 kW upward
+  (100 % complete ≥ 50 kW, 0 % < 30 kW); sub-threshold units are private households.
+  Consumer tables (large gas/electricity consumers) stay unfiltered.
+- **Coordinate plausibility, unit level:** a published coordinate outside the §2 sanity bounds
+  or > 10 km outside its declared Landkreis (BKG VG5000 polygon, 0.015° buffer; 848 of
+  134 354 located units) is treated as missing → the site takes the address geocode.
+  Provenance `mastr_coord_method ∈ {mastr_published, address_geocode,
+  address_geocode_{bbox,district}_mismatch, address_geocode_plz_town_only}` +
+  `mastr_coord_dropped_units`.
+- **Street-less sites (0.3 %) get a PLZ + town geocode** — explicitly NOT site-accurate:
+  `address_geocode_plz_town_only`, `geocode_precision` postcode/city, never a dedup anchor,
+  confidence capped (§B2 coarse rule). The geocoder skips the street query when no street is
+  given so such rows can never be labelled house precision.
+- **`business_type` from the operator's registered WZ section** (market_actors, 80.8 %
+  coverage; keyword map `MASTR_WZ_KEYWORD_TO_BUSINESS_TYPE`: Energieversorgung → power;
+  manufacturing / mining / water-waste / agriculture / logistics → industrial; Handel → shop;
+  Bau → craft; hospitality / health / education / culture → amenity; other services → office),
+  technology rule (`consumer-only → industrial`, else `power`) only as fallback;
+  `mastr_business_type_method ∈ {wz_section, tech}`. Reason: industrial self-generators
+  (ArcelorMittal Bremen 240 MW, BASF Ludwigshafen 1 GW, Salzgitter, Brauerei Beck) were
+  "power". Technology stays in `business_subtype`/`mastr_techs`; NACE is still Part C's job.
+- **No consolidation of same-operator Lokationen** (8 381 operators have ≥ 2 sites within
+  300 m, e.g. a plant's generation + gas-consumption Lokationen): one row per (operator,
+  Lokation) stays; cross-source resolution may still link them.
+- Side product `grid_connections_DE_4326.parquet` (263 863 connection points located via
+  Lokation → unit coordinates; 94 k at medium voltage or above) — map layer, not part of the
+  Company table.
 
 ### B6 Handelsregister (optional, `--include-hr`)
 Per PLZ in scope, ≤ 60 req/h, parse name / legal form / register number / court / seat →

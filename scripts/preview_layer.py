@@ -28,7 +28,7 @@ ATTR_COLS = ["id", "name", "business_type", "business_subtype", "address_full",
              "website", "grounds_area_m2", "source", "confidence_score",
              "nace_primary", "is_industrial", "ied_activity",
              "abw_heat_mwh_a", "abw_temp_c", "geocode_precision",
-             "ovt_confidence", "ovt_dataset"]
+             "ovt_confidence", "ovt_dataset", "mastr_kw", "mastr_techs", "mastr_status", "mastr_coord_method"]
 
 # IE-RL Anhang I — short German labels for the tooltip (regulatory text, no
 # classification). Lookup tries the exact code, then strips trailing "(…)" groups:
@@ -245,6 +245,9 @@ def main() -> None:
         # ovt_dataset — user decision 2026-08-27: sub-source toggles not needed)
         if "overture" in str(rec.get("source") or ""):
             grp["overture"] = str(rec.get("business_type") or "unmapped")
+        # the MaStR row filters by technology mix (spec §B5)
+        if "mastr" in str(rec.get("source") or ""):
+            grp["mastr"] = str(rec.get("mastr_techs") or "unknown")
         if grp:
             rec["_grp"] = grp
         if rec.get("ied_activity") is not None:
@@ -447,7 +450,7 @@ window.addEventListener("load", function () {
   var REG = {};   // register datasets (ied, abwaerme, …): match partners + groups
   var MATCH_COLOURS = {matched: "#0d8a72", only: "#a31515"};
   // display names for dataset rows ("abwaerme" is the BfEE Plattform für Abwärme)
-  var DS_LABELS = {osm: "OSM", ied: "IED", abwaerme: "PfA", overture: "OVT"};
+  var DS_LABELS = {osm: "OSM", ied: "IED", abwaerme: "PfA", overture: "OVT", mastr: "MaStR"};
   function dsLabel(s) { return DS_LABELS[s] || s; }
   var polyW = {}, polyBB = {};   // world-coord surface rings + bboxes, by row index
   DATA.forEach(function (d, i) {
