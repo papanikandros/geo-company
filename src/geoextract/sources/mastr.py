@@ -19,8 +19,19 @@ Energieversorgung → power, manufacturing/mining/water-waste/agriculture/logist
 industrial, Handel → shop, Bau → craft, hospitality/health/education/culture → amenity,
 other services → office; otherwise the technology rule ("power" for generation/storage,
 "industrial" for pure consumer sites). Method recorded in mastr_business_type_method.
+business_subtype is NULL for MaStR rows — never the technology (user decision
+2026-09-03) and not the WZ either (user decision 2026-09-04: the operator's WZ 2025
+classification lives in mastr_wz_abschnitt / mastr_wz_gruppe / mastr_wz_code and is shown
+as its own "mastr_wz" line in the preview). MaStR WZ labels are WZ 2025 (sections A–V),
+NOT WZ 2008. mastr_wz_code (3-digit group, "35.1") comes from the Destatis structure file
+config.MASTR_WZ2025_XLSX + config.MASTR_WZ_GROUP_ALIASES.
 One row per (operator, Lokation) — same-operator Lokationen are NOT merged (user decision
 2026-09-01; cross-source entity resolution may still link them).
+
+Capacities are captured PER UNIT, one-to-one, in mastr_tech_detail (JSON, grouped by
+technology, every MaStR power/energy field verbatim under its MaStR column name) — no
+sums across units or technologies, ever (user decision 2026-09-03: generation kW,
+storage kWh and gas kW are different physical quantities).
 
 Generation units below 50 kW are dropped (MaStR publishes exact coordinates only from
 50 kW; below that are private households — user decision 2026-08-31). Unit coordinates
@@ -28,8 +39,9 @@ outside the sanity bbox or > 10 km outside their declared Landkreis (VG5000) are
 as missing (acceptance checks 2026-08-31: ~1–3 % per technology, placeholder values such
 as (5.0, 47.0)) — the site then takes the address geocode, with provenance.
 
-Debug columns: mastr_kw, mastr_units, mastr_techs, mastr_status,
-mastr_commissioned, mastr_site_name, mastr_wz_*, geocode_* (only for the
+Debug columns: mastr_tech_detail, mastr_units, mastr_techs, mastr_status,
+mastr_commissioned, mastr_site_name, mastr_wz_* (labels), mastr_wz_code (WZ 2025 group
+code), geocode_* (only for the
 minority of sites without published coordinates), mastr_coord_method
 (mastr_published | address_geocode | address_geocode_{bbox,district}_mismatch |
 address_geocode_plz_town_only — the last one is NOT site-accurate),
@@ -41,7 +53,10 @@ Lokation → linked units, attributed with network name/Sparte/voltage level.
 """
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
+import unicodedata
 import warnings
 from pathlib import Path
 
@@ -51,29 +66,37 @@ import pandas as pd
 
 from .. import config, geocode, paths, schema
 
-# per-table quirks: unit-name column candidates, capacity column, filters
+# per-table quirks: unit-name column candidates, kW floor (on Bruttoleistung), status
+# handling, and the per-unit capacity fields captured VERBATIM (MaStR column names; units
+# per the MaStR data model: *leistung → kW, Speicherkapazitaet/Arbeitsgasvolumen → kWh).
+_GEN_FIELDS = ["Bruttoleistung", "Nettonennleistung"]
 _TABLE_SPEC: dict[str, dict] = {
     "wind_extended": {"names": ["NameWindpark", "NameStromerzeugungseinheit"],
-                      "min_kw": config.MASTR_MIN_KW},
+                      "min_kw": config.MASTR_MIN_KW, "fields": _GEN_FIELDS},
     "solar_extended": {"names": ["NameStromerzeugungseinheit"],
-                       "min_kw": config.MASTR_MIN_PV_KW},
+                       "min_kw": config.MASTR_MIN_PV_KW, "fields": _GEN_FIELDS},
     "biomass_extended": {"names": ["NameStromerzeugungseinheit"],
-                         "min_kw": config.MASTR_MIN_KW},
+                         "min_kw": config.MASTR_MIN_KW, "fields": _GEN_FIELDS},
     "hydro_extended": {"names": ["NameStromerzeugungseinheit"],
-                       "min_kw": config.MASTR_MIN_KW},
+                       "min_kw": config.MASTR_MIN_KW, "fields": _GEN_FIELDS},
     "storage_extended": {"names": ["NameStromerzeugungseinheit"],
-                         "min_kw": config.MASTR_MIN_STORAGE_KW},
+                         "min_kw": config.MASTR_MIN_STORAGE_KW,
+                         "fields": _GEN_FIELDS + ["NutzbareSpeicherkapazitaet",
+                                                  "LeistungsaufnahmeBeimEinspeichern"]},
     "combustion_extended": {"names": ["NameKraftwerk", "NameStromerzeugungseinheit"],
-                            "min_kw": config.MASTR_MIN_KW},
+                            "min_kw": config.MASTR_MIN_KW, "fields": _GEN_FIELDS},
     "gsgk_extended": {"names": ["NameStromerzeugungseinheit"],
-                      "min_kw": config.MASTR_MIN_KW},
+                      "min_kw": config.MASTR_MIN_KW, "fields": _GEN_FIELDS},
     "nuclear_extended": {"names": ["NameKraftwerk", "NameStromerzeugungseinheit"],
-                         "keep_all_status": True},
-    "gas_producer": {"names": ["NameGaserzeugungseinheit"]},
+                         "keep_all_status": True, "fields": _GEN_FIELDS},
+    "gas_producer": {"names": ["NameGaserzeugungseinheit"], "fields": ["Erzeugungsleistung"]},
     "gas_consumer": {"names": ["NameGasverbrauchsseinheit"],
-                     "kw": "MaximaleGasbezugsleistung"},
-    "gas_storage_extended": {"names": ["NameStromerzeugungseinheit", "NameGasspeichereinheit"]},
-    "electricity_consumer": {"names": ["NameStromverbrauchseinheit"]},
+                     "fields": ["MaximaleGasbezugsleistung"]},
+    "gas_storage_extended": {"names": ["NameStromerzeugungseinheit", "NameGasspeichereinheit"],
+                             "fields": ["MaximaleEinspeicherleistung",
+                                        "MaximaleAusspeicherleistung",
+                                        "MaximalNutzbaresArbeitsgasvolumen"]},
+    "electricity_consumer": {"names": ["NameStromverbrauchseinheit"], "fields": []},
 }
 _CONSUMER_SUBTYPES = {"gas_consumption", "electricity_consumption"}
 _STATUS_OK = {"In Betrieb", "InBetrieb", "35"}
@@ -96,6 +119,40 @@ def _business_type_from_wz(section_label) -> str | None:
         if keyword in label:
             return business_type
     return None
+
+
+def _norm_wz_label(label) -> str:
+    """Normalisation shared by the Destatis titles and the MaStR labels: NFKC, lowercase,
+    unify dashes, drop punctuation, collapse whitespace."""
+    t = unicodedata.normalize("NFKC", str(label)).lower().replace("–", "-").replace("—", "-")
+    t = re.sub(r"\s*-\s*", "-", t)
+    t = re.sub(r"[^\w]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _load_wz_groups(data_root: Path) -> dict[str, str] | None:
+    """Normalised WZ 2025 group title → 3-digit code ("35.1"), from the Destatis structure
+    file plus config.MASTR_WZ_GROUP_ALIASES. None (with a warning) when the file is absent —
+    mastr_wz_code then stays NULL."""
+    xlsx = data_root / config.MASTR_WZ2025_XLSX
+    if not xlsx.exists():
+        print(f"[mastr] WARNING: {xlsx} missing — mastr_wz_code stays NULL "
+              f"(download per mastr-refactor-plan.md §A4)")
+        return None
+    wz = pd.read_excel(xlsx, sheet_name=config.MASTR_WZ2025_SHEET)
+    wz.columns = ["level", "code", "title"]
+    groups = wz[wz["level"] == 3]
+    lut = {_norm_wz_label(t): str(c) for c, t in zip(groups["code"], groups["title"])}
+    for label, code in config.MASTR_WZ_GROUP_ALIASES.items():
+        lut[_norm_wz_label(label)] = code
+    return lut
+
+
+def _wz_group_code(label, lut: dict[str, str] | None) -> str | None:
+    """3-digit WZ 2025 group code ("35.1") for one MaStR group label; None when unknown."""
+    if label is None or pd.isna(label) or not lut:
+        return None
+    return lut.get(_norm_wz_label(str(label).strip()))
 
 
 def _load_districts(data_root: Path) -> gpd.GeoDataFrame | None:
@@ -164,16 +221,23 @@ def _read_units(con: sqlite3.Connection, table: str, spec: dict) -> pd.DataFrame
         print(f"[mastr] table {table} missing in the bulk db — skipped")
         return None
     name_col = next((c for c in spec.get("names", []) if c in have), None)
-    kw_col = spec.get("kw", "Bruttoleistung")
+    fields = [c for c in spec.get("fields", []) if c in have]
     cols = [c for c in _UNIT_BASE_COLS if c in have]
-    if kw_col in have and kw_col not in cols:
-        cols.append(kw_col)
+    cols += [c for c in fields if c not in cols]
     if name_col:
         cols.append(name_col)
     df = pd.read_sql(f'SELECT {", ".join(f"`{c}`" for c in cols)} FROM {table}', con)
     df["_site_name"] = df[name_col].astype("string") if name_col else pd.NA
-    df["_kw"] = pd.to_numeric(df.get(kw_col), errors="coerce")
+    # the kW floor applies to Bruttoleistung only (consumer tables have no floor)
+    df["_kw"] = pd.to_numeric(df.get("Bruttoleistung"), errors="coerce")
     df["_tech"] = config.MASTR_TABLES[table]
+    # per-unit capacity fields, verbatim, non-null only — the one-to-one record that
+    # mastr_tech_detail carries; nothing is ever summed
+    num = {c: pd.to_numeric(df[c], errors="coerce") for c in fields}
+    df["_fields"] = [
+        {c: float(num[c].iat[i]) for c in fields if pd.notna(num[c].iat[i])}
+        for i in range(len(df))
+    ]
 
     if not spec.get("keep_all_status") and "EinheitBetriebsstatus" in df.columns:
         n0 = len(df)
@@ -215,6 +279,17 @@ def _aggregate_sites(units: pd.DataFrame) -> pd.DataFrame:
         nn = s.dropna()
         return nn.iloc[0] if len(nn) else None
 
+    def _tech_detail(g: pd.DataFrame) -> str:
+        """{"wind": [{"unit": "SEE…", "Bruttoleistung": 3000.0, …}, …], …} — one entry
+        per unit, MaStR field names verbatim, units ordered by MaStR number."""
+        detail: dict[str, list[dict]] = {}
+        order = sorted(range(len(g)), key=lambda k: str(g["EinheitMastrNummer"].iat[k]))
+        for k in order:
+            rec = {"unit": g["EinheitMastrNummer"].iat[k]}
+            rec.update(g["_fields"].iat[k] or {})
+            detail.setdefault(g["_tech"].iat[k], []).append(rec)
+        return json.dumps(dict(sorted(detail.items())), ensure_ascii=False)
+
     def _agg(g: pd.DataFrame) -> pd.Series:
         techs = sorted(g["_tech"].unique())
         lat = pd.to_numeric(g["Breitengrad"], errors="coerce")
@@ -224,7 +299,7 @@ def _aggregate_sites(units: pd.DataFrame) -> pd.DataFrame:
             "lokation": g["_lok"].iloc[0],
             "techs": "+".join(techs),
             "is_consumer_only": set(techs) <= _CONSUMER_SUBTYPES,
-            "kw": round(float(g["_kw"].sum()), 1) if g["_kw"].notna().any() else None,
+            "tech_detail": _tech_detail(g),
             "units": int(len(g)),
             "site_name": _first(g["_site_name"]),
             "status": _first(g.get("EinheitBetriebsstatus")),
@@ -333,12 +408,25 @@ def extract_mastr(data_root: Path, force: bool = False) -> gpd.GeoDataFrame:
                               index=sites.index, dtype="string")
     bt_method = pd.Series(np.where(bt_wz.notna(), "wz_section", "tech"),
                           index=sites.index, dtype="string")
+    # WZ 2025 group code (debug column; the classification itself never enters the
+    # contract fields — business_subtype stays NULL for MaStR rows)
+    wz_groups = _load_wz_groups(data_root)
+    wz_code = pd.Series([_wz_group_code(lbl, wz_groups) for lbl in sites["op_wz_gruppe"]],
+                        index=sites.index, dtype="string")
+    n_lbl = int(sites["op_wz_gruppe"].notna().sum())
+    if n_lbl:
+        n_code = int(wz_code.notna().sum())
+        print(f"[mastr] WZ group code resolved for {n_code} of {n_lbl} sites with a group label")
+        if n_code < n_lbl:
+            miss = sites.loc[sites["op_wz_gruppe"].notna() & wz_code.isna(), "op_wz_gruppe"]
+            print(f"[mastr] WARNING: unresolved WZ group labels (add to "
+                  f"config.MASTR_WZ_GROUP_ALIASES): {miss.value_counts().head(10).to_dict()}")
 
     out = pd.DataFrame({
         "id": "mastr_" + sites["operator"].astype(str) + "_" + sites["lokation"].astype(str),
         "name": sites["op_name"].astype("string"),
         "business_type": business_type,
-        "business_subtype": sites["techs"].astype("string"),
+        "business_subtype": pd.Series(pd.NA, index=sites.index, dtype="string"),
         "address_street": sites["street"].astype("string"),
         "address_housenumber": sites["housenumber"].astype("string"),
         "address_postcode": sites["postcode"].astype("string"),
@@ -355,7 +443,7 @@ def extract_mastr(data_root: Path, force: bool = False) -> gpd.GeoDataFrame:
         "longitude": pd.array(sites["longitude"], dtype="Float64"),
         "source": "mastr",
         # --- debug columns (after the contract, spec §3.4) ---
-        "mastr_kw": pd.array(sites["kw"], dtype="Float64"),
+        "mastr_tech_detail": sites["tech_detail"].astype("string"),
         "mastr_units": pd.array(sites["units"], dtype="Int64"),
         "mastr_techs": sites["techs"].astype("string"),
         "mastr_status": sites["status"].astype("string"),
@@ -364,6 +452,7 @@ def extract_mastr(data_root: Path, force: bool = False) -> gpd.GeoDataFrame:
         "mastr_wz_abschnitt": sites["op_wz_abschnitt"].astype("string"),
         "mastr_wz_abteilung": sites["op_wz_abteilung"].astype("string"),
         "mastr_wz_gruppe": sites["op_wz_gruppe"].astype("string"),
+        "mastr_wz_code": wz_code,
         "geocode_precision": precs.astype("string"),
         "mastr_coord_method": coord_method,
         "mastr_coord_dropped_units": pd.array(sites["coord_dropped"], dtype="Int64"),

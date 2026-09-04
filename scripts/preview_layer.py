@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from string import Template
 
@@ -24,11 +25,14 @@ PALETTE = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b",
            "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
 
 # attribute columns embedded per point (table + tooltip + CSV export)
-ATTR_COLS = ["id", "name", "business_type", "business_subtype", "address_full",
+ATTR_COLS = ["id", "name", "business_type", "business_type_source", "business_subtype",
+             "business_subtype_source", "address_full",
              "website", "grounds_area_m2", "source", "confidence_score",
              "nace_primary", "is_industrial", "ied_activity",
              "abw_heat_mwh_a", "abw_temp_c", "geocode_precision",
-             "ovt_confidence", "ovt_dataset", "mastr_kw", "mastr_techs", "mastr_status", "mastr_coord_method"]
+             "ovt_confidence", "ovt_dataset", "mastr_techs", "mastr_units", "mastr_tech_detail",
+             "mastr_wz_abschnitt", "mastr_wz_gruppe", "mastr_wz_code", "mastr_status",
+             "mastr_coord_method"]
 
 # IE-RL Anhang I — short German labels for the tooltip (regulatory text, no
 # classification). Lookup tries the exact code, then strips trailing "(…)" groups:
@@ -107,6 +111,9 @@ IED_ACTIVITY_LABELS = {
     "6.10": "Holzschutzmittelbehandlung",
     "6.11": "Eigenständige Behandlung von Industrieabwasser",
 }
+
+
+_WZ_SECTION_RE = re.compile(r"^\s*Abschnitt\s+([A-Z])\s*[-–—]\s*(.+?)\s*$")
 
 
 def _activity_label(code) -> str | None:
@@ -245,9 +252,26 @@ def main() -> None:
         # ovt_dataset — user decision 2026-08-27: sub-source toggles not needed)
         if "overture" in str(rec.get("source") or ""):
             grp["overture"] = str(rec.get("business_type") or "unmapped")
-        # the MaStR row filters by technology mix (spec §B5)
+        # the MaStR row filters by SINGULAR technology toggles: a site is a member of
+        # every technology it has and shows if ANY enabled one matches (user decision
+        # 2026-09-03)
         if "mastr" in str(rec.get("source") or ""):
-            grp["mastr"] = str(rec.get("mastr_techs") or "unknown")
+            grp["mastr"] = str(rec.get("mastr_techs") or "unknown").split("+")
+        # the operator's WZ 2025 classification on EVERY MaStR site (user decision
+        # 2026-09-04) — also when a higher-priority source won business_type/subtype
+        wz_sec = rec.get("mastr_wz_abschnitt")
+        if wz_sec:
+            sec = _WZ_SECTION_RE.sub(r"\1 – \2", str(wz_sec))
+            grp_lbl = rec.get("mastr_wz_gruppe")
+            code = rec.get("mastr_wz_code")
+            rec["_wz"] = sec + (" / " + (f"{code} " if code else "") + str(grp_lbl) if grp_lbl else "")
+        # per-unit capacities: embed the JSON as an object (hover blocks + CSV)
+        td = rec.get("mastr_tech_detail")
+        if isinstance(td, str) and td:
+            try:
+                rec["mastr_tech_detail"] = json.loads(td)
+            except json.JSONDecodeError:
+                pass
         if grp:
             rec["_grp"] = grp
         if rec.get("ied_activity") is not None:
@@ -383,6 +407,10 @@ PAGE_TMPL = r"""
     max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   #pv-table tr:hover {background:#eef4fb}
   #pv-note {padding:6px 10px;color:#777;border-top:1px solid #eee;font-size:11px}
+  #pv-search {display:block;width:100%;box-sizing:border-box;margin-top:6px;padding:4px 6px;
+    font:12px sans-serif;border:1px solid #bbb;border-radius:3px}
+  #pv-table tr.pv-hit {cursor:pointer}
+  .pv-link {color:#1a5fb4;text-decoration:underline}
   .leaflet-container {cursor:default}
 </style>
 <div id="pv-tools">
@@ -397,6 +425,8 @@ PAGE_TMPL = r"""
   <div id="pv-panel-head">
     <button id="pv-download" onclick="pvDownload()">Download</button>
     <b>Companies</b><span id="pv-count"></span>
+    <input id="pv-search" type="search" placeholder="search company name … (visible companies; click a row to zoom)"
+           title="case-insensitive substring match on name among the currently visible companies; results replace the list">
   </div>
   <div id="pv-table-wrap"><table id="pv-table"></table></div>
   <div id="pv-note"></div>
@@ -470,10 +500,11 @@ window.addEventListener("load", function () {
       R.idx.push(i);
       R.match[srcs.length > 1 ? "matched" : "only"].n++;
       var gname = grpOf[i] && grpOf[i][s];   // only this source's own group concept
-      if (gname) {
-        var g = R.grps[gname] || (R.grps[gname] = {n: 0, on: true});
+      // a list means multi-membership (MaStR technologies): count the row in each
+      (Array.isArray(gname) ? gname : (gname ? [gname] : [])).forEach(function (gn) {
+        var g = R.grps[gn] || (R.grps[gn] = {n: 0, on: true});
         g.n++;
-      }
+      });
     });
     if (d.poly) {   // polygons only ever come from OSM geometries
       OSM.nSurf++;
@@ -506,6 +537,10 @@ window.addEventListener("load", function () {
     if (!R || !R.on || srcsOf[i].indexOf(s) < 0) return false;
     if (!R.match[matchOf(i)].on) return false;
     var g = grpOf[i] && grpOf[i][s];
+    if (Array.isArray(g)) {   // ANY enabled technology keeps the site visible
+      for (var k = 0; k < g.length; k++) if (!R.grps[g[k]] || R.grps[g[k]].on) return true;
+      return false;
+    }
     if (g && R.grps[g] && !R.grps[g].on) return false;
     return true;
   }
@@ -628,11 +663,70 @@ window.addEventListener("load", function () {
     }
     return grid;
   }
-  var hoverTip = L.tooltip();
-  map.on("mousemove", function (e) {
-    if (mode) return;   // selection drag has priority
+  // MaStR per-unit capacity fields, verbatim MaStR column names; unit hints follow the
+  // MaStR data model (…leistung → kW, Speicherkapazitaet / Arbeitsgasvolumen → kWh)
+  var UNIT_OF = {Bruttoleistung: "kW", Nettonennleistung: "kW", Erzeugungsleistung: "kW",
+    MaximaleGasbezugsleistung: "kW", LeistungsaufnahmeBeimEinspeichern: "kW",
+    MaximaleEinspeicherleistung: "kW", MaximaleAusspeicherleistung: "kW",
+    NutzbareSpeicherkapazitaet: "kWh", MaximalNutzbaresArbeitsgasvolumen: "kWh"};
+  var HOVER_UNIT_CAP = 10;   // per technology; the CSV export always holds every unit
+  function fmtNum(v) { return typeof v === "number" ? v.toLocaleString("de-DE") : esc(v); }
+  // one line per technology: "solar: Bruttoleistung 750 kW, Nettonennleistung 660 kW";
+  // several units of one technology → one indented line per unit (never summed), no
+  // unit ids (user decision 2026-09-04)
+  function techLines(td) {
+    if (!td || typeof td !== "object") return "";
+    return Object.keys(td).sort().map(function (tech) {
+      var units = td[tech] || [];
+      var fld = function (u) {
+        return Object.keys(u).filter(function (k) { return k !== "unit"; })
+          .map(function (k) { return esc(k) + " " + fmtNum(u[k]) + (UNIT_OF[k] ? " " + UNIT_OF[k] : ""); })
+          .join(", ") || "(no capacity field in MaStR)";
+      };
+      if (units.length === 1) return "&nbsp;&nbsp;" + esc(tech) + ": " + fld(units[0]);
+      var lines = units.slice(0, HOVER_UNIT_CAP).map(function (u) { return "&nbsp;&nbsp;&nbsp;&nbsp;" + fld(u); });
+      if (units.length > HOVER_UNIT_CAP)
+        lines.push("&nbsp;&nbsp;&nbsp;&nbsp;… + " + (units.length - HOVER_UNIT_CAP) + " more units (see CSV)");
+      return "&nbsp;&nbsp;" + esc(tech) + " (" + units.length + " units):<br>" + lines.join("<br>");
+    }).join("<br>");
+  }
+  // which source supplied business_type / business_subtype (resolve records it)
+  var SRC_SHORT = {osm: "osm", overture: "overture", abwaerme: "abw", ied: "ied", mastr: "mastr"};
+  function srcTag(src) {
+    if (!src) return "";
+    var parts = String(src).split("+").map(function (x) { return SRC_SHORT[x] || x; });
+    return " (" + esc(parts.join("+")) + ")";
+  }
+  function webUrl(w) {
+    if (!w) return null;
+    w = String(w).trim();
+    if (!/^https?:\/\//i.test(w)) w = "https://" + w;
+    return w;
+  }
+  function nameHtml(d) {   // blue link to the company website when there is one
+    var u = webUrl(d.website), nm = esc(d.name == null ? "" : d.name);
+    return u ? '<a class="pv-link" href="' + esc(u) + '" target="_blank" rel="noopener">' + nm + "</a>" : nm;
+  }
+  function hoverHtml(d) {
+    var html = ["name", COLOR_COL === "business_type" ? null : "business_type", COLOR_COL,
+                "business_subtype", "_wz", "grounds_area_m2", "nace_primary", "source", "_act",
+                "abw_heat_mwh_a", "abw_temp_c", "ovt_confidence"]
+      .filter(function (c2, j, a) { return c2 && c2 in d && d[c2] !== null && a.indexOf(c2) === j; })
+      .map(function (c2) {
+        var label = c2 === "_act" ? "ied_activity" : (c2 === "_wz" ? "mastr_wz" : c2);
+        if (c2 === "name") return "<b>name:</b> " + nameHtml(d);
+        var val = esc(d[c2]);
+        if (c2 === "business_type") val += srcTag(d.business_type_source);
+        if (c2 === "business_subtype") val += srcTag(d.business_subtype_source);
+        return "<b>" + esc(label) + ":</b> " + val;
+      }).join("<br>");
+    var techs = techLines(d.mastr_tech_detail);
+    if (techs) html += "<br><b>mastr_technologies:</b><br>" + techs;
+    return html;
+  }
+  function nearest(latlng) {   // nearest VISIBLE company within 8 px, or -1
     var z = map.getZoom(), s = Math.pow(2, z);
-    var g = hoverGrid(z), w = map.project(e.latlng, z);
+    var g = hoverGrid(z), w = map.project(latlng, z);
     var gx = (w.x / CELL) | 0, gy = (w.y / CELL) | 0, best = -1, bd = 64;
     for (var dx = -1; dx <= 1; dx++) for (var dy = -1; dy <= 1; dy++) {
       var cell = g[(gx + dx) + ":" + (gy + dy)];
@@ -644,17 +738,31 @@ window.addEventListener("load", function () {
         if (d2 < bd) { bd = d2; best = i; }
       }
     }
-    if (best >= 0) {
+    return best;
+  }
+  // click on a company pins its card (a Leaflet popup, links clickable); clicking
+  // another company replaces it; clicking empty map closes it
+  var pinned = -1;
+  var popup = L.popup({maxWidth: 420});
+  popup.on("remove", function () { pinned = -1; });
+  function pinCard(i) {
+    pinned = i;
+    var d = DATA[i];
+    popup.setLatLng([d.lat, d.lon]).setContent(hoverHtml(d) || "—").openOn(map);
+    if (map.hasLayer(hoverTip)) map.removeLayer(hoverTip);
+  }
+  map.on("click", function (e) {
+    if (mode) return;
+    var i = nearest(e.latlng);
+    if (i >= 0) pinCard(i);
+  });
+  var hoverTip = L.tooltip();
+  map.on("mousemove", function (e) {
+    if (mode) return;   // selection drag has priority
+    var best = nearest(e.latlng);
+    if (best >= 0 && best !== pinned) {
       var d = DATA[best];
-      var html = ["name", COLOR_COL === "business_type" ? null : "business_type", COLOR_COL,
-                  "business_subtype", "grounds_area_m2", "nace_primary", "source", "_act",
-                  "abw_heat_mwh_a", "abw_temp_c", "ovt_confidence"]
-        .filter(function (c2, j, a) { return c2 && c2 in d && d[c2] !== null && a.indexOf(c2) === j; })
-        .map(function (c2) {
-          var label = c2 === "_act" ? "ied_activity" : c2;
-          return "<b>" + esc(label) + ":</b> " + esc(d[c2]);
-        }).join("<br>");
-      hoverTip.setContent(html || "—").setLatLng([d.lat, d.lon]);
+      hoverTip.setContent(hoverHtml(d) || "—").setLatLng([d.lat, d.lon]);
       if (!map.hasLayer(hoverTip)) hoverTip.addTo(map);
     } else if (map.hasLayer(hoverTip)) {
       map.removeLayer(hoverTip);
@@ -733,7 +841,10 @@ window.addEventListener("load", function () {
   }
   var GRP_ORDER = ["energy", "metals", "minerals", "chemicals", "waste",
                    "livestock", "other",
-                   "< 1 GWh/a", "1–10 GWh/a", "10–100 GWh/a", "> 100 GWh/a"];
+                   "< 1 GWh/a", "1–10 GWh/a", "10–100 GWh/a", "> 100 GWh/a",
+                   "solar", "wind", "biomass", "hydro", "combustion", "geothermal", "nuclear",
+                   "storage", "gas_production", "gas_storage", "gas_consumption",
+                   "electricity_consumption"];
   Object.keys(REG).sort().forEach(function (s2) {   // register rows: match + groups
     var R = REG[s2];
     var row = addRow(dsLabel(s2));
@@ -754,7 +865,9 @@ window.addEventListener("load", function () {
     if (grps.length) row.appendChild(sep());
     var GRP_TIPS = {ied: "Annex-I activity group filter (from ied_activity, 1:1)",
                     abwaerme: "heat-quantity band filter (from abw_heat_mwh_a)",
-                    overture: "business type filter"};
+                    overture: "business type filter",
+                    mastr: "technology toggle — a site stays visible while ANY of its " +
+                           "technologies is enabled (counts: sites having that technology)"};
     grps.forEach(function (g) {
       var st = R.grps[g];
       row.appendChild(mkBtn((COLOURS[g] ? swatch(COLOURS[g]) : "") + esc(g) + nHtml(st.n),
@@ -839,20 +952,49 @@ window.addEventListener("load", function () {
   var ALL_COLS = $ALL_COLS;   // full column set (records drop their null fields)
   var TBL_COLS = ["name", COLOR_COL, "address_full", "grounds_area_m2", "source"]
     .filter(function (c, i, a) { return ALL_COLS.indexOf(c) >= 0 && a.indexOf(c) === i; });
-  function currentIdx() {   // the table and the CSV export hold ONLY the selection
+  // name search (right panel): a non-empty query REPLACES the selection list with the
+  // visible companies whose name contains the query (case-insensitive)
+  var query = "";
+  var searchBox = document.getElementById("pv-search");
+  searchBox.addEventListener("input", function () {
+    query = searchBox.value.trim().toLowerCase();
+    renderTable();
+  });
+  function searchIdx() {
+    var out = [];
+    for (var i = 0; i < N; i++) {
+      var nm = DATA[i].name;
+      if (nm != null && String(nm).toLowerCase().indexOf(query) >= 0 && visible(i)) out.push(i);
+    }
+    return out;
+  }
+  function currentIdx() {   // table + CSV export: the search hits, else ONLY the selection
+    if (query) return searchIdx();
     return selected ? Array.from(selected).sort(function (a, b) { return a - b; }) : [];
   }
+  window.pvGoto = function (i) {   // click-to-zoom: centre on the company, pin its card
+    var d = DATA[i];
+    map.setView([d.lat, d.lon], Math.max(map.getZoom(), 16));
+    pinCard(i);
+  };
+  document.getElementById("pv-table").addEventListener("click", function (e) {
+    if (e.target.closest("a")) return;   // website link: open it, do not zoom
+    var tr = e.target.closest("tr[data-i]");
+    if (tr) pvGoto(+tr.getAttribute("data-i"));
+  });
   function renderTable() {
     var idx = currentIdx();
-    document.getElementById("pv-count").textContent = selected
-      ? idx.length + " selected" : "no selection";
+    document.getElementById("pv-count").textContent = query
+      ? idx.length + " match" + (idx.length === 1 ? "" : "es")
+      : (selected ? idx.length + " selected" : "no selection");
     document.getElementById("pv-download").disabled = !idx.length;
     var rows = idx.slice(0, TABLE_CAP).map(function (i) {
       var d = DATA[i];
-      return "<tr>" + TBL_COLS.map(function (c) {
-        var v = d[c] == null ? "" : d[c];
-        return '<td title="' + esc(v) + '">' + esc(v) + "</td>";
-      }).join("") + "</tr>";
+      return '<tr class="pv-hit" data-i="' + i + '" title="click to zoom to this company">' +
+        TBL_COLS.map(function (c) {
+          var v = d[c] == null ? "" : d[c];
+          return '<td title="' + esc(v) + '">' + (c === "name" ? nameHtml(d) : esc(v)) + "</td>";
+        }).join("") + "</tr>";
     });
     document.getElementById("pv-table").innerHTML = idx.length
       ? "<tr>" + TBL_COLS.map(function (c) { return "<th>" + esc(c) + "</th>"; }).join("") +
@@ -860,8 +1002,9 @@ window.addEventListener("load", function () {
       : "";
     document.getElementById("pv-note").textContent = idx.length
       ? (idx.length > TABLE_CAP ? "table shows first " + TABLE_CAP + " rows — " : "") +
-        "Download exports all " + idx.length + " rows as CSV"
-      : "box- or lasso-select companies on the map to list them here — Esc deselects";
+        "Download exports all " + idx.length + " rows as CSV — click a row to zoom"
+      : (query ? "no visible company name contains \"" + query + "\""
+               : "type a name above, or box-/lasso-select companies on the map — Esc deselects");
   }
 
   // ---- CSV download of the selection (all visible rows if nothing selected) ----
@@ -871,7 +1014,7 @@ window.addEventListener("load", function () {
     var cols = ALL_COLS;
     var q = function (v) {
       if (v === null || v === undefined) return "";
-      v = String(v);
+      v = typeof v === "object" ? JSON.stringify(v) : String(v);
       return /[",\n;]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
     };
     var lines = [cols.join(",")].concat(idx.map(function (i) {
@@ -931,7 +1074,10 @@ window.addEventListener("load", function () {
 
   // Esc: drop the selection and leave select mode
   document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape") { pvClear(); if (mode) pvMode(mode); }
+    if (e.key === "Escape") {
+      if (query) { query = ""; searchBox.value = ""; }
+      pvClear(); if (mode) pvMode(mode);
+    }
   });
 
   draw(); renderTable();

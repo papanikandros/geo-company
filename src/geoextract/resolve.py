@@ -51,6 +51,10 @@ class _UnionFind:
             self.parent[rj] = ri
 
 
+# category fields whose supplying source is recorded as <col>_source (debug columns)
+PROVENANCE_COLS = ("business_type", "business_subtype")
+
+
 def _priority(source: str) -> int:
     primary = str(source).split("+")[0]
     try:
@@ -149,7 +153,13 @@ def resolve(frames: list[gpd.GeoDataFrame]) -> gpd.GeoDataFrame:
     gdf["merged_at"] = merged_at
 
     singleton_mask = pd.Series(roots).groupby(roots).transform("size").to_numpy() == 1
-    out_rows = [gdf[singleton_mask]]
+    # provenance of the category fields (which member supplied the value) — for a
+    # singleton that is its own source; for clusters it is recorded below
+    singles = gdf[singleton_mask].copy()
+    for col in PROVENANCE_COLS:
+        singles[col + "_source"] = singles["source"].where(singles[col].notna(), pd.NA) \
+            .astype("string")
+    out_rows = [singles]
 
     fill_cols = [c for c in gdf.columns
                  if c not in ("geometry", "_root", "source", "source_count", "merged_at")]
@@ -163,6 +173,9 @@ def resolve(frames: list[gpd.GeoDataFrame]) -> gpd.GeoDataFrame:
         for col in fill_cols:
             non_null = ranked[col].dropna()
             record[col] = non_null.iloc[0] if len(non_null) else pd.NA
+            if col in PROVENANCE_COLS:
+                record[col + "_source"] = (
+                    ranked.at[non_null.index[0], "source"] if len(non_null) else pd.NA)
         sources = sorted({s for src in ranked["source"] for s in str(src).split("+")})
         record["source"] = "+".join(sources)
         record["source_count"] = len(sources)

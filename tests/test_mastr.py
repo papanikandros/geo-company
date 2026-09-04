@@ -1,4 +1,6 @@
-"""Phase B5 — MaStR adapter: filters, natural-person drop, site aggregation."""
+"""Phase B5 — MaStR adapter: filters, natural-person drop, site aggregation, per-unit
+capacity capture (B5.1: one-to-one, no sums), WZ 2025 group code (mastr_wz_code)."""
+import json
 import sqlite3
 
 import pandas as pd
@@ -19,6 +21,7 @@ def _mk_db(tmp_path):
         "LokationMastrNummer": ["SEL1", "SEL1", "SEL2", "SEL2"],
         "EinheitBetriebsstatus": ["In Betrieb"] * 4,
         "Bruttoleistung": [3000.0, 2000.0, 4000.0, 40.0],   # SEE4 < 50 kW → dropped
+        "Nettonennleistung": [2900.0, None, 3950.0, 39.0],
         "Laengengrad": [8.8, 8.801, 9.9, 9.9],
         "Breitengrad": [53.1, 53.101, 53.5, 53.5],
         "Strasse": ["Deich", "Deich", None, None],
@@ -66,6 +69,19 @@ def _mk_db(tmp_path):
     return root
 
 
+def _mk_wz_xlsx(root):
+    """Minimal Destatis-shaped WZ 2025 structure file (Level/Code/Titel)."""
+    xlsx = root / config.MASTR_WZ2025_XLSX
+    xlsx.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({
+        "Level": [1, 2, 3, 3, 3],
+        "Code": ["D", "35", "35.1", "82.2", "16.1"],
+        "Titel": ["ENERGIEVERSORGUNG", "Energieversorgung", "Elektrizitätsversorgung",
+                  "Call Centers", "Säge- und Hobelwerke; Bearbeitung und Veredlung von Holz"],
+    }).to_excel(xlsx, sheet_name=config.MASTR_WZ2025_SHEET, index=False)
+    return xlsx
+
+
 def test_extract_mastr_aggregates_and_filters(tmp_path):
     root = _mk_db(tmp_path)
     gdf = mastr.extract_mastr(root)
@@ -73,19 +89,30 @@ def test_extract_mastr_aggregates_and_filters(tmp_path):
     assert len(gdf) == 3
     s1 = gdf[gdf.id == "mastr_ABR1_SEL1"].iloc[0]
     assert s1["name"] == "Windkraft Weser GmbH"
-    assert s1.business_type == "power"
-    assert s1.mastr_units == 3
-    assert s1.mastr_kw == pytest.approx(5500.0)     # 3000 + 2000 + 500 (≥100 kW only)
-    assert "solar" in s1.business_subtype and "wind" in s1.business_subtype
+    assert s1.business_type == "power"          # no WZ → tech rule, no suffix
+    assert pd.isna(s1.business_subtype)          # technology is never a subtype
+    assert s1.mastr_units == 3 and s1.mastr_techs == "solar+wind"
+    assert "mastr_kw" not in gdf.columns         # no summed capacity anywhere
+    # per-unit capacities one-to-one, MaStR field names verbatim, NaN fields omitted
+    detail = json.loads(s1.mastr_tech_detail)
+    assert sorted(detail) == ["solar", "wind"]
+    assert detail["wind"] == [
+        {"unit": "SEE1", "Bruttoleistung": 3000.0, "Nettonennleistung": 2900.0},
+        {"unit": "SEE2", "Bruttoleistung": 2000.0},
+    ]
+    assert detail["solar"] == [{"unit": "SOL2", "Bruttoleistung": 500.0}]
     assert s1.legal_form == "GmbH" and s1.hr_registration == "HRB 123"
     assert s1.mastr_coord_method == "mastr_published" and s1.mastr_coord_dropped_units == 0
-    # SEL2: the 40 kW unit SEE4 is below the 50 kW floor → one unit, 4000 kW
+    # SEL2: the 40 kW unit SEE4 is below the 50 kW floor → one unit
     s2 = gdf[gdf.id == "mastr_ABR2_SEL2"].iloc[0]
-    assert s2.mastr_units == 1 and s2.mastr_kw == pytest.approx(4000.0)
-    # gas consumer site → industrial
+    assert s2.mastr_units == 1
+    assert json.loads(s2.mastr_tech_detail) == {
+        "wind": [{"unit": "SEE3", "Bruttoleistung": 4000.0, "Nettonennleistung": 3950.0}]}
+    # gas consumer site → industrial; its own MaStR field, not "kw"
     g1 = gdf[gdf.id == "mastr_ABR2_GVL1"].iloc[0]
     assert g1.business_type == "industrial"
-    assert g1.mastr_kw == pytest.approx(5000.0)
+    assert json.loads(g1.mastr_tech_detail) == {
+        "gas_consumption": [{"unit": "GVE1", "MaximaleGasbezugsleistung": 5000.0}]}
     # ABR3 (natural person) contributed no rows; ids unique; cache written
     assert gdf.id.is_unique
     assert paths.source_parquet(root, "mastr", "DE").exists()
@@ -111,7 +138,7 @@ def test_wz_overrides_tech_rule_and_streetless_sites_get_coarse_geocode(tmp_path
     con.execute("UPDATE market_actors SET HauptwirtdschaftszweigAbschnitt = "
                 "'Abschnitt C – Verarbeitendes Gewerbe' WHERE MastrNummer = 'ABR1'")
     # a ≥ 50 kW unit with neither coordinates nor street, only PLZ + town
-    con.execute("INSERT INTO wind_extended VALUES ('SEE5','ABR2','SEL3','In Betrieb',900.0,"
+    con.execute("INSERT INTO wind_extended VALUES ('SEE5','ABR2','SEL3','In Betrieb',900.0,880.0,"
                 "NULL,NULL,NULL,NULL,'27568','Bremerhaven','Bremen',NULL,'04012000',"
                 "'2022-01-01','WP Hafen')")
     con.commit(); con.close()
@@ -170,3 +197,48 @@ def test_status_filter_raises_loudly_on_unknown_values(tmp_path):
     con.commit(); con.close()
     with pytest.raises(ValueError, match="status filter matched 0"):
         mastr.extract_mastr(root, force=True)
+
+
+def test_wz_label_norm():
+    n = mastr._norm_wz_label
+    assert n("Säge- und Hobelwerke; Bearbeitung") == n("Säge – und  Hobelwerke, Bearbeitung")
+    assert n("Call Center") != n("Call Centers")   # aliases exist for exactly this
+
+
+def test_wz_group_code_resolved_and_contract_fields_untouched(tmp_path):
+    root = _mk_db(tmp_path)
+    _mk_wz_xlsx(root)
+    con = sqlite3.connect(root / config.MASTR_DB)
+    con.execute("ALTER TABLE market_actors ADD COLUMN HauptwirtdschaftszweigAbschnitt TEXT")
+    con.execute("ALTER TABLE market_actors ADD COLUMN HauptwirtdschaftszweigGruppe TEXT")
+    con.execute("UPDATE market_actors SET HauptwirtdschaftszweigAbschnitt = "
+                "'Abschnitt D – Energieversorgung', HauptwirtdschaftszweigGruppe = "
+                "'Elektrizitätsversorgung' WHERE MastrNummer = 'ABR1'")
+    # ABR2: a MaStR label that differs from the Destatis title → alias table
+    con.execute("UPDATE market_actors SET HauptwirtdschaftszweigAbschnitt = "
+                "'Abschnitt O – Erbringung von sonstigen wirtschaftlichen Dienstleistungen', "
+                "HauptwirtdschaftszweigGruppe = 'Call Center' WHERE MastrNummer = 'ABR2'")
+    con.commit(); con.close()
+
+    gdf = mastr.extract_mastr(root, force=True)
+    s1 = gdf[gdf.id == "mastr_ABR1_SEL1"].iloc[0]
+    assert s1.business_type == "power" and pd.isna(s1.business_subtype)
+    assert s1.mastr_wz_code == "35.1" and s1.mastr_wz_gruppe == "Elektrizitätsversorgung"
+    s2 = gdf[gdf.id == "mastr_ABR2_SEL2"].iloc[0]
+    assert s2.business_type == "office" and pd.isna(s2.business_subtype)
+    assert s2.mastr_wz_code == "82.2"          # alias table
+    assert set(gdf.business_type) <= {"power", "office", "industrial"}
+
+
+def test_wz_code_null_without_wz_file(tmp_path, capsys):
+    root = _mk_db(tmp_path)
+    con = sqlite3.connect(root / config.MASTR_DB)
+    con.execute("ALTER TABLE market_actors ADD COLUMN HauptwirtdschaftszweigGruppe TEXT")
+    con.execute("UPDATE market_actors SET HauptwirtdschaftszweigGruppe = "
+                "'Elektrizitätsversorgung' WHERE MastrNummer = 'ABR1'")
+    con.commit(); con.close()
+    gdf = mastr.extract_mastr(root, force=True)
+    assert "WARNING" in capsys.readouterr().out
+    s1 = gdf[gdf.id == "mastr_ABR1_SEL1"].iloc[0]
+    assert pd.isna(s1.business_subtype) and pd.isna(s1.mastr_wz_code)
+    assert s1.mastr_wz_gruppe == "Elektrizitätsversorgung" and s1.business_type == "power"

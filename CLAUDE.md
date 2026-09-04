@@ -106,15 +106,171 @@ business emails only (GDPR).
    pin `date=` and keep a `.bak` of the export outside that dir.
 4. Spell out every abbreviation on first use.
 
-## Status snapshot (2026-08-29 — details in Claude's project memory)
+## Status snapshot (2026-08-30 — details in Claude's project memory)
 
 - A0–A5 + B1 (IED) + B2 (Abwärme/PfA) + B3 (Overture) done: DE table 4 083 494 companies,
   4 sources, 320 726 multi-source clusters. B4 (Foursquare) deferred as redundant.
-- **B5 (MaStR): code complete + tested; DATA MISSING** — one verified 3.16 GB fetch of
-  `Gesamtdatenexport_20260827` pending user go. Fetch: `data/raw/mastr/segfetch3.sh`
-  (proven; only-206 + CRC-verified). Parse: `data/raw/mastr/download_probe.py`
-  (date-pinned). Open question: `business_type` for consumer-only sites.
-- Git: repo intentionally at ZERO commits (user is rewriting the baseline message);
-  agreed commit split lives in Claude's memory (`git-recommit-plan`).
-- Canonical preview: `data/previews/companies_merged_DE_industrial.html` — full data,
-  never sampled, currently `--states hamburg,schleswig-holstein`; per-dataset toggle rows.
+- **B5 (MaStR) kW floor (decision 2026-08-31):** only units ≥ 50 kW are searched/mapped (PV + storage ≥ 100 kW) — MaStR's own coordinate-publication thresholds; sub-threshold units are households, never in the Company table. Data present since 2026-08-31 (see memory).
+- **B5 (MaStR): code complete + tested; DATA MISSING** (stale — see line above) — one verified 3.16 GB fetch of
+  `Gesamtdatenexport_20260827` pending user go (golden rule 3!). Fetch:
+  `data/raw/mastr/segfetch3.sh` (proven; only-206 + CRC-verified → then `cp` a `.bak`
+  outside `~/.open-MaStR/`). Parse: `data/raw/mastr/download_probe.py` (date-pinned).
+  Open question: `business_type` for consumer-only sites. B5 files are deliberately
+  uncommitted: `sources/mastr.py`, `tests/test_mastr.py`, and the MaStR blocks in
+  `config.py`/`pipeline.py` (worktree mods vs committed B5-free versions — do not revert).
+- Git: history committed 2026-08-30 (7 commits: baseline → core A0-A5 → B1 → B2 → B3 →
+  preview → docs); user makes every commit, Claude stages and shows messages inline.
+  Untracked-by-decision: old consumer scripts (`scripts/build_*`, `app_bokeh_companies.py`),
+  plan .md files, `.commit-messages/`, `.playwright-mcp/`.
+- Canonical preview: `data/previews/companies_merged_DE_industrial.html` — regenerate with
+  `uv run --extra viz python scripts/preview_layer.py data/geoextract/companies_merged_DE_4326.parquet
+  --states hamburg,schleswig-holstein --out data/previews/companies_merged_DE_industrial.html`
+  (full data, never sampled; per-dataset toggle rows).
+
+## Todo queue (ordered — user decisions 2026-09-03; this order is authoritative)
+
+The "Research todos" section below holds the evidence and detail for each item; this queue
+fixes the ORDER. Nothing starts without an explicit go (golden rule 2); every download
+needs its own go with the volume stated first (golden rule 3).
+
+1. **B5.1 MaStR refactor** — `mastr-refactor-plan.md` (per-unit kW one-to-one, no sums;
+   `business_type` keeps its vocabulary + WZ 2025 section suffix
+   `industrial (C – Verarbeitendes Gewerbe)`; `business_subtype` = WZ group code + label
+   `35.1 Elektrizitätsversorgung` via `data/raw/wz2025/gliederung-wz2025.xlsx`; preview:
+   singular tech toggles, per-tech hover, name search, click-to-zoom). Adapter + tests +
+   Bremen check first; the DE re-run waits for item 2.
+2. **Resolve-stage speedups — MUST precede any DE re-run** (many re-runs expected):
+   parallel candidate-pair sweep over grid cells (process pool, 14 cores) + vectorized
+   cluster assembly (groupby-first by source priority instead of the per-cluster Python
+   loop). Target: DE merge from ~2.5 h to well under 30 min, identical output (assert
+   cluster-for-cluster equality against the previous merge on Bremen and DE).
+3. **DE re-run + canonical preview**, then the `phase(B5)` commit (user) with the spec
+   status block amended for B5.1 and the stale status snapshot in this file refreshed.
+4. **Industrial-signal 3-parter** (approved earlier): OSM power inflation, Overture
+   subtype → industrial override (67 subtypes hidden under office), drop
+   geographic_entities.
+5. **Entity-resolution normalization pass** (prerequisite for 6 and for Splink): umlauts/ß,
+   legal-form suffixes (GmbH, GmbH & Co. KG, e.K., …), Straße/Str. variants; then the
+   Splink-vs-heuristic benchmark on Bremen and cluster-wide one-to-one matching.
+6. **B6 Handelsregister — BEFORE Part C, no longer optional.** Purpose: verify that the
+   entities in the merged table EXIST and cross-check them in every field a register
+   offers (name, legal form, seat address, HR number/court, status incl. dissolved).
+   - Preferred route: a **bulk register dump** matched locally (fast, no 60 req/h limit).
+     Before any download: probe the candidate dumps for freshness and size and report
+     both — `okfde/offeneregister.de` (OpenCorporates/OKFN dump; suspected stale, check
+     date first), plus any newer open bulk source found in a fresh research pass. The
+     `bundesAPI/handelsregister` CLI (≤ 60 req/h) is only for spot-checks / the residual.
+   - Match on normalized name + city/PLZ (item 5), record `hr_*` provenance and a
+     `register_match` status per row; a non-match is NOT proof of non-existence — most
+     small businesses (sole traders, amenities) are not HR-registered.
+   - Output feeds `confidence` and becomes the ground truth for Part C evaluation.
+7. **Part C NACE classification — refactored against the 2026-08-30 research** before
+   any classify code is written: read INSEE GRAAL / codif-ape-train (adapt vs
+   reimplement), Kühnemann 2020 + Beuter 2025; crawl4ai + ARGUS practices for fetching;
+   tags/register hints as a first-class evidence path (54 % of firms have no findable
+   website). Order inside C: C1 reference data → C5 intrinsic/register (free: MaStR WZ,
+   IED activity, OSM tag rules, HR data from item 6) → C2 scraper → C3 baseline → C4 AI
+   → C6 writeback.
+   - **Target revision: always the LATEST — WZ 2025 / NACE Rev. 2.1** (user decision
+     2026-09-03; the spec's "NACE Rev. 2 / WZ 2008" wording is superseded — amend spec §0/§3
+     descriptions additively, no column renames). Older sources map forward via the
+     Destatis 2008 → 2025 Umsteigeschlüssel (xlsx, ~176 KB, download needs go).
+8. **E1** tests / README / CI; then validation layers (sEEnergies/Hotmaps, Overture
+   overlap stats, density QA) as time allows.
+
+## Research todos (moved from research-todos.md, 2026-08-31)
+
+Source: research run in `research/geo-company-extraction/` (report.md has the full evidence; DOIs in
+bibliography.bib). Each todo is a proposal — nothing here is implemented without explicit go
+(golden rule 2). Ordered by expected value.
+
+### Entity resolution (A-phase upgrade)
+
+- [ ] **Evaluate Splink against the current heuristic clustering on Bremen.**
+      `moj-analytical-services/splink` (MIT, native DuckDB backend — fits the QuackOSM stack).
+      Fellegi–Sunter model with EM-learned match weights instead of hand-tuned distance/name
+      thresholds. Benchmark: agreement with the existing 320 726 multi-source clusters, plus manual
+      spot-check of disagreements. Reference for German-register practice: Destatis method test
+      (Kramer 2026, 10.23889/ijpds.v11i5.3814). Full-text notes: notes/linacre2022.md, kramer2026.md.
+      - [ ] Prerequisite (from Destatis): normalization pass BEFORE linkage — umlauts/ß, legal-form
+            suffixes (GmbH, GmbH & Co. KG, e.K., …), Straße/Str. address variants.
+      - [ ] Conservative validation baseline (Zhang & Pfoser recipe): stop-word-stripped name
+            similarity ≥ 0.9 within ≤ 50 m; expect matched-pair coordinate agreement ~30–40 m.
+      - [ ] Name metric: tuned Jaro–Winkler + token-order-robust ensemble suffices for German
+            Latin-script names (Santos et al. — neural gain is mostly cross-alphabet); no NN matcher.
+      - [ ] Blocking radius is a free parameter in the field (50–1000 m, Sun et al. review) — sweep it
+            on Bremen rather than assuming.
+- [ ] **Enforce one-to-one matching cluster-wide** (assignment/graph formulation à la Novack et al.
+      2018, 10.3390/ijgi7030117) instead of greedy nearest-match — cheap even without Splink.
+- [ ] Optional, if address noise becomes a matching problem: trial `openvenues/libpostal` (MIT) for
+      address normalization before blocking.
+
+### B5 MaStR (fetch + parse DONE 2026-08-31; mastr.db 11 GB, .bak kept)
+
+- [ ] **B5.1 refactor (PLANNED, awaiting go — see `mastr-refactor-plan.md`):** per-unit
+      kW fields one-to-one (NO sums, `mastr_tech_detail` JSON), drop `mastr_kw`,
+      business_subtype without technology; preview: singular tech toggles (any-match),
+      per-tech kW/kWh hover, name search + click-to-zoom in sidebar.
+
+- [ ] Future re-parse of a newer export: trial open-mastr's parallel mode
+      (`os.environ['NUMBER_OF_PROCESSES']`) — the single-process parse took 56 min for 63 GB XML.
+
+- [x] **Adopt Tepe et al. 2023 as acceptance checks** — DONE 2026-08-31 (`scripts/mastr_acceptance_checks.py`, report in `data/raw/mastr/acceptance/`; paper replicated: 3.07 % wind outside district, coords 96.8/4.1/0.2 %): 90 SQL data tests, open code at
+      github.com/FlorianK13/verify-marktstammdaten (notes/tepe2023.md). Run the location tests on our
+      parsed export before merging into the DE table. Known failure modes to check for:
+      >3% of wind units with coordinates outside their declared district (errors 40–300 km);
+      coordinate completeness by technology 97% (wind) → 5% (solar) → 0% (storage) — plan geocoding
+      fallback for coordinate-less units; implausible MW/ha densities (21.3% of ground-mounted PV).
+      - [x] (measured 1.36× unit→Lokation inflation; adapter aggregates per (operator, Lokation)) Expect MaStR to OVERSHOOT real sites ~35% via per-unit registration (Plinke et al. biogas
+            study) → cluster units to sites before counting companies; ~10% of real sites may be
+            missing. Their aerial-validated Lower Saxony biogas register (doi:10.25835/in90p55t) is
+            free ground truth for our site-clustering logic.
+
+### C phase — NACE classification (before writing any classify code)
+
+- [ ] **Read `InseeFrLab/GRAAL` (MIT)** — LLM + embeddings + RAG NACE classification module from the
+      French statistical office; architecturally our planned classify stage. Decide: adapt vs
+      reimplement. Also skim `InseeFrLab/codif-ape-train` for hierarchical NACE rev 2.1 handling.
+- [ ] **Read the two key papers**: Kühnemann/van Delden/Windmeijer 2020 (NACE from web page texts,
+      10.3233/sji-200675) and Beuter et al. 2025 (German business-activity descriptions,
+      10.1007/978-3-032-10004-7_10). Expect: hierarchy + class imbalance are the hard parts; thin/no
+      website text is the residual — same as our consumer-only-site open question.
+- [ ] **Evaluate `crawl4ai` (Apache-2.0, already starred) for C-phase website fetching** — must respect
+      robots.txt, 1 req/s per domain, home + max 5 internal pages (spec licensing rules).
+      Do NOT vendor AGPL code (firecrawl, open-MaStR) into the package.
+      Proven German-firm crawl practices to copy from ARGUS/ZEW (notes/kinne2020.md,
+      github.com/datawizard1337/ARGUS): prefer short URLs when picking internal pages, per-page
+      language detection with German preference, drop cross-domain redirects, Wayback Machine as
+      fallback for dead URLs (Gök et al.).
+- [ ] **Plan for the ~54% website gap**: only 46% of German firms have a findable URL, biased against
+      small/young/rural firms (Kinne & Axenbeck, 2.52M-firm MUP population). NACE classification MUST
+      keep tags/register hints as a first-class evidence path, not just a fallback — aligns with the
+      B5 consumer-only-site open question.
+
+### New source / validation opportunities
+
+- [ ] **sEEnergies / Hotmaps industrial-sites adapter (B-phase candidate)**: georeferenced EU
+      energy-intensive site DB (Manz et al. 2021, 10.3390/su13031439; open data hub). Check license
+      terms + overlap with existing B1 IED clusters; likely more valuable as a validation layer than
+      as a fifth source.
+- [ ] **German Overture validation as a by-product**: Ballantyne & Berragan 2024 validated Overture
+      places for the UK only (10.1177/23998083241263124; notes/ballantyne2024.md — <5% count deficit,
+      6–8 m positional accuracy vs Geolytix). Our B3-vs-B1/B2 cluster-overlap stats are a publishable
+      gap — write them down when we next regenerate the merged table.
+      - [ ] Concrete rule for B3 QA now: stratify by `sources_dataset` — Microsoft-sourced places can
+            be up to 100% brand/category-missing — and never filter on a single attribute.
+- [ ] **Cheap completeness QA layer**: per-grid-cell expected-density proxy à la Herfort et al.
+      (notes/herfort2023.md; W-European urban OSM near saturation, rural unproven) to flag cells where
+      our company density is implausibly low.
+- [ ] Opportunistic enrichment: `bundesAPI/handelsregister` CLI for HR numbers (≤60 req/h limit);
+      check `okfde/offeneregister.de` dump freshness first.
+
+### Research housekeeping
+
+- [x] **Deep-reading pass** — DONE 2026-08-30 (29 MB): 12 papers read in full, page-referenced notes
+      in research/geo-company-extraction/notes/, report.md updated (§1b). 6 papers remain
+      abstract-only (MDPI/IOS Press/PMC bot-gating): Manz 2021, Novack 2018, Deng 2019, Kühnemann
+      2020, food-outlet matcher 2024, LLM-POI 2026.
+- [ ] Optional: retry the 6 bot-gated PDFs via browser (claude-in-chrome) or manual download if their
+      full texts become load-bearing (Kühnemann 2020 is the most valuable — the CBS NACE-from-web
+      methodology).

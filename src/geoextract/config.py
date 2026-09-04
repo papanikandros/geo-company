@@ -185,7 +185,34 @@ MASTR_WZ_KEYWORD_TO_BUSINESS_TYPE: list[tuple[str, str]] = [
     ("sport", "amenity"),
     ("abschnitt", "office"),                      # every remaining service/admin section
 ]
-# open-mastr unit tables to read (technology → business_subtype value).
+# WZ 2025 (Klassifikation der Wirtschaftszweige, Destatis, DL-DE-BY-2.0) structure file —
+# level/code/title. MaStR carries the operator's WZ section/division/group only as German
+# LABELS; this file turns the group label into its 3-digit code ("35.1") for
+# business_subtype ("35.1 Elektrizitätsversorgung") and the mastr_wz_code debug column.
+# Downloaded 2026-09-03 (user go); see mastr-refactor-plan.md §A4.
+MASTR_WZ2025_XLSX = "raw/wz2025/gliederung-wz2025.xlsx"
+MASTR_WZ2025_SHEET = "WZ 2025 Struktur"
+# MaStR group labels that differ from the Destatis titles (NACE 2.1 DE wording / typos):
+# measured 2026-09-03 — 274 of 287 labels match exactly after normalisation, these 13
+# cover the rest (100 % of operators with a group). Keys are matched after the same
+# normalisation as the file titles.
+MASTR_WZ_GROUP_ALIASES: dict[str, str] = {
+    "Auswärtige Angelegenheiten, Verteidigung, Rechtspflege/Justiz, öffentliche Sicherheit und Ordnung": "84.2",
+    "Call Center": "82.2",
+    "Erbringung von Dienstleistungen für den Unterricht": "85.6",
+    "Erbringung von Dienstleistungen für kunstschaffende und darstellende Künste": "90.3",
+    "Grundschulen/Volksschulen": "85.2",
+    "Herstellung von Beförderungsmitteln": "30.9",
+    "Herstellung von Bekleidung und Bekleidungszubehör": "14.2",
+    "Herstellung von Mess- und Kontrollinstrumenten sowie Uhren": "26.5",
+    "Oberflächenveredlung und Wärmebehandlung; Metallbearbeitung": "25.5",
+    "Sammeln von wild wachsenden Produkten, ohne Holz": "02.3",
+    "Soziale Betreuung von älterern Menschen und von Menschen mit Behinderung": "88.1",
+    "Säge-, Hobel- und Holzimprägnierwerke; Bearbeitung und Veredlung von Holz": "16.1",
+    "Verlegen von Büchern und Zeitschriften; sonstiges Verlagswesen, ohne Software": "58.1",
+}
+# open-mastr unit tables to read (technology → mastr_techs value; NOT business_subtype —
+# user decision 2026-09-03, technology lives only in mastr_* columns).
 # nuclear keeps ALL operating statuses (fleet shut down since 2023 — the sites and
 # their operators still exist; user decision 2026-08-27); everything else In Betrieb only.
 MASTR_TABLES = {
