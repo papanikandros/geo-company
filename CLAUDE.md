@@ -109,8 +109,8 @@ business emails only (GDPR).
 ## Status snapshot (2026-09-04 — details in Claude's project memory)
 
 - A0–A5 + B1 (IED) + B2 (Abwärme/PfA) + B3 (Overture) + B5 (MaStR, B5.1 refactor) done:
-  DE table **4 145 466 companies** (2026-09-04, after item 4), 5 sources, `is_industrial`
-  370 050. B4 (Foursquare) deferred as redundant.
+  DE table **4 139 625 companies** (2026-09-04, after items 4 + 5), 5 sources, `is_industrial`
+  ≈ 370 k. B4 (Foursquare) deferred as redundant.
 - **B5 MaStR:** data present since 2026-08-31 (`data/raw/mastr/mastr.db`, 11 GB, zip + .bak
   kept); kW floors ≥ 50 kW (PV/storage ≥ 100 kW); B5.1 (2026-09-04): per-unit
   `mastr_tech_detail`, no kW sums; `business_subtype` NULL; WZ 2025 in `mastr_wz_*` +
@@ -159,9 +159,47 @@ needs its own go with the volume stated first (golden rule 3).
    c. Root `geographic_entities` dropped in the adapter (19 307 rows).
    DE table 4 164 518 → **4 145 466** companies; `is_industrial` 700 932 → **370 050**
    (105 627 register-backed). `man_made` structures (155 k) knowingly kept for now.
-5. **Entity-resolution normalization pass** (prerequisite for 6 and for Splink): umlauts/ß,
-   legal-form suffixes (GmbH, GmbH & Co. KG, e.K., …), Straße/Str. variants; then the
-   Splink-vs-heuristic benchmark on Bremen and cluster-wide one-to-one matching.
+5. **Entity-resolution normalization pass — DONE 2026-09-04** (spec §A3 amended):
+   token-based legal-form stripping incl. dotted spellings (46 961 `G.m.b.H.`-style names were
+   missed before), title/connector noise, full+light key ensemble scoring (max), and
+   `normalize_street` for B6. DE: multi-source clusters 351 823 → 355 133 (+4 058 new merges,
+   336 borderline losses), table 4 141 720 companies; resolve 187 s (two scoring passes).
+   Still open under item 5:
+   - [x] **Splink benchmark on Bremen — DONE 2026-09-04** (`scripts/splink_benchmark.py`,
+         report `data/geoextract/eval/splink_vs_heuristic_bremen.md`; splink 4.0.17 added).
+         Same 40 419 rows, same 100 m blocking; EM-trained Fellegi–Sunter on Jaro–Winkler
+         (full + light name key), metric distance bands, postcode. Result at p ≥ 0.9:
+         4 192 pairs vs heuristic 3 818; both 3 112, Splink-only 1 080, heuristic-only 706
+         (precision 0.74 / recall 0.82 vs the heuristic — the disagreements are mixed in BOTH
+         directions, so neither is ground truth). Learned weights are sensible: exact name
+         +12, ≤ 25 m +10.4, ≤ 100 m +8.6, postcode +4.2.
+         Findings: (1) Splink catches identical-name pairs 50–100 m apart that the 50 m rule
+         misses (Rossmann 81 m, Lidl 88 m, Homebox 63 m, "Gondel"/"Gondel Bremen" 6 m) —
+         name-similar pairs grow 3 339 → 3 708 from 50 to 100 m; (2) Splink rejects dubious
+         heuristic merges — short names at ratio 80 ("NK Beauty"/"Beauty Line",
+         "GEW Bremen"/"NGG Bremen", "Budget"/"Avis Autovermietung") and polygon-containment
+         merges at ratio 60–78 (Airbus/ArianeGroup 301 m, Klinikum/its pharmacy,
+         Metropol/Musical Theater); (3) Splink's Jaro–Winkler is NOT token-order robust
+         ("Dr. Volker Martin"/"Martin Volker Dr." missed) and it chains branch-like names
+         (cambio station Kepler/Römer 134 m, Terminal 1/2). 6.6 s incl. training.
+         **Three rule changes — DONE 2026-09-04 (user go):** (1) ratio ≥ 95 matches up to
+         100 m; (2) containment path needs both names ≥ 2 tokens + ratio ≥ 70
+         (`DEDUP_CONTAIN_RULE="ratio70"`; alternative `"token_subset"` measured: near-identical
+         effect on Bremen, rejects same-suffix pairs like Metropol/Musical Theater, loses
+         "KiGa girotondo" — switchable in config); (3) ratio 80–89 within 50 m needs ≥ 2
+         shared tokens or ≥ 8 shared characters, ratio ≥ 90 stands alone. Bremen validated by
+         hand: 246 gained pairs (all identical names 50–110 m: Rossmann, Lidl, Aral, Deutsche
+         Bank …), 308 lost pairs (nearly all false: shopping-centre tenants sharing the
+         centre's name, hospital ↔ its pharmacy/church, "Paros"/"Torros Döner"; known true
+         losses: single-token "Homebox" inside "Homebox Germany", "Kraftwerk Hastedt").
+         DE: 4 139 625 companies, 331 504 multi-source clusters; resolve 207 s.
+         Splink stays an evaluation tool (`scripts/splink_benchmark.py`).
+   - [ ] **One-to-one matching cluster-wide — recommend NOT enforcing** (measured 2026-09-04):
+         5 956 DE clusters hold several rows of one register, almost all one operator's
+         several MaStR Lokationen inside one plant polygon (AUMA Riester, Abwasserzweckverband
+         Breisgauer Bucht, Schwarzwaldmilch) — legitimate under the 2026-09-01 "no
+         consolidation of same-operator Lokationen, resolution may link them" decision.
+         Revisit only if Splink shows chaining errors.
 6. **B6 Handelsregister — BEFORE Part C, no longer optional.** Purpose: verify that the
    entities in the merged table EXIST and cross-check them in every field a register
    offers (name, legal form, seat address, HR number/court, status incl. dissolved).

@@ -26,20 +26,45 @@ from rapidfuzz import fuzz, process
 from . import config, schema
 
 _UMLAUTS = str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"})
-_LEGAL_FORMS_RE = re.compile(
-    r"\b(" + "|".join(re.escape(s) for s in
-                      sorted(config.LEGAL_FORM_SUFFIXES, key=len, reverse=True)) + r")\b"
-)
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9 ]+")
+# dots/spaces inside abbreviations: "g.m.b.h." → "gmbh", "e. k." → "ek", "co. kg" → "cokg"
+_ABBREV_DOT_RE = re.compile(r"\b([a-z])\.\s?(?=[a-z]\b|[a-z]\.)")
+_CO_KG_RE = re.compile(r"\bco\.?\s*kg\b")
+_STREET_RE = re.compile(r"(?<=[a-z])str\.?(?=\s|$)|\bstr\.?(?=\s|$)|strasse|straße")
 
 
-def normalize_name(name: object) -> str:
-    """lowercase → umlaut transliteration → strip legal forms → alnum only → collapse ws."""
-    if name is None or (isinstance(name, float) and np.isnan(name)) or pd.isna(name):
+def _is_missing(value: object) -> bool:
+    return value is None or (isinstance(value, float) and np.isnan(value)) or pd.isna(value)
+
+
+def normalize_name(name: object, strip_noise: bool = True) -> str:
+    """Company-name key for matching (todo item 5, 2026-09-04): lowercase → umlaut
+    transliteration → collapse dotted abbreviations (G.m.b.H., e.K., Co. KG) → alnum
+    tokens → drop legal-form tokens anywhere (config.LEGAL_FORM_TOKENS) and, with
+    ``strip_noise``, title/connector noise (config.NAME_NOISE_TOKENS). The matcher scores
+    both keys and keeps the higher score: stripping a title shared by both names can push
+    a true pair below the threshold ("Dr. med J Heidt" / "Dr. med. Joachim Heidt")."""
+    if _is_missing(name):
         return ""
     text = str(name).lower().translate(_UMLAUTS)
-    text = _LEGAL_FORMS_RE.sub(" ", text)
+    text = _CO_KG_RE.sub(" cokg ", text)
+    for _ in range(3):   # "g.m.b.h." needs several passes of the pairwise collapse
+        text = _ABBREV_DOT_RE.sub(r"\1", text)
     text = _NON_ALNUM_RE.sub(" ", text)
+    drop = config.LEGAL_FORM_TOKENS | (config.NAME_NOISE_TOKENS if strip_noise else set())
+    return " ".join(t for t in text.split() if t not in drop)
+
+
+def normalize_street(street: object) -> str:
+    """Street key for address matching (B6 prep): lowercase, umlauts, "Str." / "-str." /
+    "straße" → "strasse", punctuation to spaces, house-number letters glued ("12 a" → "12a")."""
+    if _is_missing(street):
+        return ""
+    text = str(street).lower().translate(_UMLAUTS)
+    text = re.sub(r"-\s*str(\.|asse|aße)?(?=\s|$)", "strasse", text)   # "Bahnhof-Str." → glued
+    text = _STREET_RE.sub("strasse", text)
+    text = _NON_ALNUM_RE.sub(" ", text)
+    text = re.sub(r"\b(\d+)\s+([a-z])\b", r"\1\2", text)
     return " ".join(text.split())
 
 
@@ -98,16 +123,20 @@ def _cell_boxes(bounds: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _matching_edges(geom_m: gpd.GeoSeries, names: list[str], anchors: np.ndarray | None,
-                    is_poly: np.ndarray) -> np.ndarray:
+                    is_poly: np.ndarray, names_light: list[str] | None = None) -> np.ndarray:
     """All (i, j) pairs (i < j) that satisfy the §A3 match rules — vectorised per batch:
-    STRtree rectangle join for candidates, rapidfuzz pairwise scoring on all cores,
-    numpy distance test, shapely contains_xy for the polygon-containment path."""
+    STRtree rectangle join for candidates, rapidfuzz pairwise scoring on all cores
+    (max over the full and the light name key when ``names_light`` is given), numpy
+    distance test, shapely contains_xy for the polygon-containment path."""
     n = len(geom_m)
     reps = geom_m.representative_point()
     xs, ys = reps.x.to_numpy(), reps.y.to_numpy()
     geoms = geom_m.to_numpy()
     names_arr = np.array(names, dtype=object)
+    light_arr = np.array(names_light, dtype=object) if names_light is not None else None
     has_name = np.array([bool(nm) for nm in names], dtype=bool)
+    if light_arr is not None:
+        has_name |= np.array([bool(nm) for nm in names_light], dtype=bool)
     ok_row = has_name if anchors is None else (has_name & anchors)
 
     boxes, queries = _cell_boxes(geom_m.bounds.to_numpy())
@@ -127,13 +156,32 @@ def _matching_edges(geom_m: gpd.GeoSeries, names: list[str], anchors: np.ndarray
             continue
         ratio = process.cpdist(names_arr[i], names_arr[j], scorer=fuzz.token_sort_ratio,
                                score_cutoff=config.DEDUP_POLYGON_NAME_RATIO, workers=-1)
+        if light_arr is not None:
+            ratio = np.maximum(ratio, process.cpdist(
+                light_arr[i], light_arr[j], scorer=fuzz.token_sort_ratio,
+                score_cutoff=config.DEDUP_POLYGON_NAME_RATIO, workers=-1))
         sim = ratio >= config.DEDUP_POLYGON_NAME_RATIO
         i, j, ratio = i[sim], j[sim], ratio[sim]
         dist = np.hypot(xs[i] - xs[j], ys[i] - ys[j])
-        accept = (dist <= config.DEDUP_DISTANCE_M) & (ratio >= config.DEDUP_NAME_RATIO)
-        # remaining path needs containment: far pairs at any ratio ≥ 60, and close pairs
-        # whose ratio sits in [60, 80) — the polygon is the extra evidence (spec §A3)
-        rest = ~accept
+        # token evidence for the surviving pairs (full key; light key when a name is
+        # nothing but noise tokens)
+        shared, shared_chars, min_tok, subset = _token_evidence(
+            names_arr, light_arr, i, j)
+        # (1) near-identical names up to 100 m; (2) ratio ≥ 80 within 50 m with substance
+        accept = ((ratio >= config.DEDUP_NEAR_IDENTICAL_RATIO)
+                  & (dist <= config.DEDUP_NEAR_IDENTICAL_DISTANCE_M))
+        substance = ((shared >= config.DEDUP_MIN_SHARED_TOKENS)
+                     | (shared_chars >= config.DEDUP_MIN_SHARED_CHARS)
+                     | (ratio >= config.DEDUP_SUBSTANCE_MAX_RATIO))
+        accept |= ((dist <= config.DEDUP_DISTANCE_M) & (ratio >= config.DEDUP_NAME_RATIO)
+                   & substance)
+        # remaining path needs containment: the polygon is the extra evidence (spec §A3);
+        # both names ≥ 2 tokens, plus the configured name rule
+        if config.DEDUP_CONTAIN_RULE == "token_subset":
+            name_ok = subset
+        else:
+            name_ok = ratio >= config.DEDUP_CONTAIN_NAME_RATIO
+        rest = ~accept & (min_tok >= config.DEDUP_CONTAIN_MIN_TOKENS) & name_ok
         if rest.any():
             ri, rj = i[rest], j[rest]
             contain = np.zeros(len(ri), dtype=bool)
@@ -153,6 +201,35 @@ def _matching_edges(geom_m: gpd.GeoSeries, names: list[str], anchors: np.ndarray
     print(f"[resolve] {n_cand:,} candidate pairs → {len(out):,} matching pairs "
           f"in {time.time() - t0:.0f}s")
     return out
+
+
+def _token_evidence(names_arr: np.ndarray, light_arr: np.ndarray | None,
+                    i: np.ndarray, j: np.ndarray):
+    """Per pair: shared token count, characters in the shared tokens, the smaller token
+    count of the two names, and whether the shorter name's tokens are all contained in the
+    longer one. Evaluated on the full AND the light key (the score is the max of both, so
+    the evidence must be too): shared tokens / chars take the stronger key."""
+    keys = [names_arr] + ([light_arr] if light_arr is not None else [])
+    n = len(i)
+    shared = np.zeros(n, dtype=np.int32)
+    chars = np.zeros(n, dtype=np.int32)
+    min_tok = np.zeros(n, dtype=np.int32)
+    subset = np.zeros(n, dtype=bool)
+    for arr in keys:
+        cache: dict[int, set[str]] = {}
+        for k, (a, b) in enumerate(zip(i.tolist(), j.tolist())):
+            ta = cache.get(a)
+            if ta is None:
+                ta = cache[a] = set(arr[a].split()) if arr[a] else set()
+            tb = cache.get(b)
+            if tb is None:
+                tb = cache[b] = set(arr[b].split()) if arr[b] else set()
+            common = ta & tb
+            shared[k] = max(shared[k], len(common))
+            chars[k] = max(chars[k], sum(len(t) for t in common))
+            min_tok[k] = max(min_tok[k], min(len(ta), len(tb)))
+            subset[k] |= bool(ta) and bool(tb) and (ta <= tb or tb <= ta)
+    return shared, chars, min_tok, subset
 
 
 def _components(n: int, edges: np.ndarray) -> np.ndarray:
@@ -182,6 +259,7 @@ def resolve(frames: list[gpd.GeoDataFrame]) -> gpd.GeoDataFrame:
 
     geom_m = gdf.geometry.to_crs(config.CRS_METRIC)
     names = [normalize_name(nm) for nm in gdf["name"]]
+    names_light = [normalize_name(nm, strip_noise=False) for nm in gdf["name"]]
     is_poly = geom_m.geom_type.isin(["Polygon", "MultiPolygon"]).to_numpy()
 
     # rows geocoded only to postcode/city centroids must not anchor dedup (spec §B2):
@@ -189,7 +267,7 @@ def resolve(frames: list[gpd.GeoDataFrame]) -> gpd.GeoDataFrame:
     anchors = (gdf["dedup_anchor"].fillna(True).to_numpy(dtype=bool)
                if "dedup_anchor" in gdf.columns else None)
 
-    edges = _matching_edges(geom_m, names, anchors, is_poly)
+    edges = _matching_edges(geom_m, names, anchors, is_poly, names_light)
     roots = _components(n, edges)
     size = np.bincount(roots, minlength=n)[roots]
     singleton_mask = size == 1

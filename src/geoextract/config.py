@@ -352,9 +352,39 @@ AGS_STATE_NAMES = {
 # --- Entity resolution knobs (spec §A3) -------------------------------------------------
 DEDUP_DISTANCE_M = 50.0        # max distance for a match
 DEDUP_NAME_RATIO = 80.0        # rapidfuzz token_sort_ratio threshold
-DEDUP_POLYGON_NAME_RATIO = 60.0  # relaxed threshold when point lies inside other's polygon
+DEDUP_POLYGON_NAME_RATIO = 60.0  # candidate floor for the polygon-containment path
+# Rule changes after the Splink benchmark (todo item 5, user go 2026-09-04):
+# (1) near-identical names match farther than 50 m (identical branches 50–100 m apart
+#     were missed: Rossmann 81 m, Lidl 88 m)
+DEDUP_NEAR_IDENTICAL_RATIO = 95.0
+DEDUP_NEAR_IDENTICAL_DISTANCE_M = 100.0
+# (2) polygon-containment path: both names ≥ 2 tokens and, by DEDUP_CONTAIN_RULE,
+#     "ratio70" → token_sort_ratio ≥ 70 (as approved) or "token_subset" → the shorter
+#     name's tokens all occur in the longer one (measured alternative, see spec §A3)
+DEDUP_CONTAIN_MIN_TOKENS = 2
+DEDUP_CONTAIN_NAME_RATIO = 70.0
+DEDUP_CONTAIN_RULE = "ratio70"
+# (3) ratio-80 matches within 50 m need substance: ≥ 2 shared tokens, or shared tokens
+#     of ≥ 8 characters in total ("NK Beauty"/"Beauty Line", "GEW Bremen"/"NGG Bremen"
+#     share one short generic token only)
+DEDUP_MIN_SHARED_TOKENS = 2
+DEDUP_MIN_SHARED_CHARS = 8
+DEDUP_SUBSTANCE_MAX_RATIO = 90.0   # ≥ 90 = spelling variant ("Erotic"/"Erotik Gigant",
+                                   # "Veronika's"/"Veronikas Treff") — no token check needed
 BLOCK_GRID_M = 100.0           # blocking grid cell size in EPSG:25832
 
+# Name normalisation for entity resolution (todo item 5, 2026-09-04; Destatis practice,
+# Kramer 2026): applied as TOKENS after dots inside abbreviations are removed
+# ("G.m.b.H." → "gmbh", "e.K." → "ek"), so every spelling variant is caught.
+LEGAL_FORM_TOKENS = {
+    "gmbh", "ggmbh", "gesmbh", "mbh", "ag", "kg", "kgaa", "ohg", "ug", "ek", "ev",
+    "se", "gbr", "eg", "cokg", "co", "inc", "ltd", "llc", "haftungsbeschraenkt",
+    "gemeinnuetzige", "gemeinnuetzig",
+}
+# titles, owner prefixes and connectors that vary between sources ("Dr. med. H. Müller"
+# vs "Zahnarzt Müller", "Müller & Söhne" vs "Müller und Söhne")
+NAME_NOISE_TOKENS = {"dr", "med", "dent", "vet", "dipl", "ing", "inh", "prof", "und", "u", "and"}
+# kept for reference/compat (old regex-based stripper); no longer used by normalize_name
 LEGAL_FORM_SUFFIXES = [
     "gmbh & co. kg", "gmbh & co kg", "gmbh", "ag", "kg", "ohg", "ug",
     "e.k.", "e.v.", "se", "gbr", "mbh", "inc", "ltd", "llc",
