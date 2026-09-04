@@ -22,7 +22,7 @@ conventions. Nothing in this file depends on having access to the ensynergies re
 > | B2 Abwärme adapter | ☑ | 2026-08-25 | BfEE v28: 23 936 potentials → 6 178 sites (3 659 companies) → geocoded via cached Nominatim §4.1 (72 % house / 20 % street / 341 coarse / 192 dropped) → 5 986 sites; DE merge: 979 of 5 932 abwaerme entities matched (17 %), 150 three-source clusters (abwaerme+ied+osm), coarse rows never merge + confidence ≤ 0.3 ✓; 201 TWh/a waste heat geolocated; Bremen clusters hand-verified incl. first triple (Mercedes-Benz) |
 > | B3 Overture adapter | ☑ | 2026-08-27 | release 2026-08-19.0 via DuckDB/S3: 2 630 706 named DE places (confidence ≥ 0.5) → DE merge 4 524 348 raw → 4 083 494 companies in ~43 min; 319 906 overture clusters (12 % match), 100 four-source (first: Mercedes-Benz Werk Bremen); name 61→83 %, website 26→65 %; Bremen hand-verified (2 806 clusters, 0 false merges); `--sources` defaults to `osm,ied,abwaerme,overture`; preview OVT row (provenance filters) verified |
 > | B4 FSQ OS Places adapter | ⊘ deferred | 2026-08-27 | likely redundant: FSQ is an Overture conflation input (25 % of our overture rows carry FSQ provenance; same category taxonomy, so no industrial gain — check-in data is thinnest exactly there); public S3 parquet withdrawn (bucket holds only LICENSE — access now gated: Places Portal Iceberg + token, or gated HF). Revisit only with a portal token + Bremen diff probe |
-> | B5 MaStR adapter | ☑ | 2026-09-03 | Gesamtdatenexport_20260827 (3.16 GB, CRC-verified segmented fetch; parse 56 min → 11 GB sqlite) → 134 526 legal-entity units ≥ floors → 102 382 sites (59 186 operators); kW floor ≥ 50 kW all techs (PV/Speicher ≥ 100 kW = MaStR coordinate-publication thresholds); acceptance checks (port of verify-marktstammdaten) replicate Kotthoff/Tepe 2023: 3.07 % onshore wind outside declared Landkreis, coords wind 96.8 %/PV 4.1 %/storage 0.2 %; 848 implausible unit coords → address geocode (provenance mastr_coord_method), 292 street-less sites PLZ+town-only (never dedup anchors); business_type via operator WZ section (81 % coverage, ArcelorMittal/BASF/Mercedes → industrial); DE merge 4 626 730 raw → **4 164 518 companies**, 327 695 multi-source clusters, 9 914 mastr rows merged (10.9 %), **60 five-source clusters** (first: Dold Holzwerke, Schwarzwaldmilch, Badische Stahlwerke); Bremen 384 sites hand-verified; grid layer 263 863 connection points; `--sources` default += mastr |
+> | B5 MaStR adapter | ☑ | 2026-09-03 | Gesamtdatenexport_20260827 (3.16 GB, CRC-verified segmented fetch; parse 56 min → 11 GB sqlite) → 134 526 legal-entity units ≥ floors → 102 382 sites (59 186 operators); kW floor ≥ 50 kW all techs (PV/Speicher ≥ 100 kW = MaStR coordinate-publication thresholds); acceptance checks (port of verify-marktstammdaten) replicate Kotthoff/Tepe 2023: 3.07 % onshore wind outside declared Landkreis, coords wind 96.8 %/PV 4.1 %/storage 0.2 %; 848 implausible unit coords → address geocode (provenance mastr_coord_method), 292 street-less sites PLZ+town-only (never dedup anchors); business_type via operator WZ section (81 % coverage, ArcelorMittal/BASF/Mercedes → industrial); DE merge 4 626 730 raw → **4 164 518 companies**, 327 695 multi-source clusters, 9 914 mastr rows merged (10.9 %), **60 five-source clusters** (first: Dold Holzwerke, Schwarzwaldmilch, Badische Stahlwerke); Bremen 384 sites hand-verified; grid layer 263 863 connection points; `--sources` default += mastr; **B5.1 refactor 2026-09-04** (per-unit `mastr_tech_detail`, no kW sums; `mastr_wz_code`; category provenance; preview tech toggles + search + pinned cards + website links) — Bremen re-validated; DE re-run 2026-09-04 with the vectorised resolve (§A3 engine note): 4 164 518 companies, clusters identical to the 2026-09-03 merge |
 > | B6 Handelsregister (optional) | ☐ | | |
 > | C1 NACE reference data | ☐ | | |
 > | C2 Website scraper | ☐ | | |
@@ -324,6 +324,15 @@ Bundesanzeiger financials, EU ETS — EUTL, E-PRTR, Destatis GENESIS.)
   highest-priority point. `source = "+".join(sorted(set))`, `source_count`, keep all member ids
   in debug column `member_ids`.
 - Single source → pass-through (same code path, no clustering).
+- **Engine (2026-09-04, todo item 2 — semantics unchanged):** candidate pairs from an
+  STRtree join of the blocking-cell rectangles (same cell or 8-neighbour; polygons register
+  their bbox footprint, capped at 40 cells per axis), name scores via
+  `rapidfuzz.process.cpdist` on all cores, distance in numpy, containment via
+  `shapely.contains_xy` on the residual pairs, array union-find, cluster assembly as one
+  sorted groupby (first non-null per column in priority order; debug provenance
+  `business_type_source` / `business_subtype_source`). Verified cluster-for-cluster
+  identical to the former per-pair/per-cluster Python loops (Bremen: 37 349 rows, all
+  member sets, geometries and columns equal; resolve 61 s → 0.7 s).
 - **DoD (Bremen, OSM+IED+Abwärme):** every IED/Abwärme site that has an OSM counterpart within
   50 m collapses (spot-check 20 by hand); no cluster merges two different companies (spot-check
   the 20 largest clusters); over-/under-merge rate documented in the summary JSON.
@@ -384,7 +393,7 @@ Hugging Face). Revisit only with a portal token and a Bremen diff probe first.
 `open-mastr` bulk download → units with `Lage`/coordinates; keep technologies
 `{Verbrennung, Biomasse, Wind, Wasser, Geothermie, Solarthermie, Speicher}` and PV only if
 `Bruttoleistung ≥ 100 kW`; operator name → `name`; `business_type=power`,
-`business_subtype=generator|plant`; capacity kept as debug `mastr_kw`.
+`business_subtype=generator|plant`; capacity kept as debug `mastr_kw` (superseded by B5.1 below).
 Amendments (2026-08-27, user-approved): **Speicher also only ≥ 100 kW** (the register now
 holds 2.76 M storage units, dominated by home batteries — unfiltered they would drown the
 table); **drop `(natürliche Person)` operators unconditionally** (anonymized private
@@ -423,6 +432,41 @@ storage 0.2 %, unit→Lokation inflation 1.36×):
 - Side product `grid_connections_DE_4326.parquet` (263 863 connection points located via
   Lokation → unit coordinates; 94 k at medium voltage or above) — map layer, not part of the
   Company table.
+
+**B5.1 amendments (2026-09-03/04, user decisions — `mastr-refactor-plan.md`):**
+- **Per-unit capacities one-to-one, no sums.** `mastr_kw` (the cross-technology sum) is
+  removed. New debug column `mastr_tech_detail` (JSON, grouped by technology, one entry per
+  unit, every MaStR power/energy field VERBATIM under its MaStR column name:
+  `Bruttoleistung`/`Nettonennleistung` for all generation + storage, storage additionally
+  `NutzbareSpeicherkapazitaet` (kWh) / `LeistungsaufnahmeBeimEinspeichern`, gas producer
+  `Erzeugungsleistung`, gas consumer `MaximaleGasbezugsleistung`, gas storage
+  `MaximaleEinspeicherleistung` / `MaximaleAusspeicherleistung` /
+  `MaximalNutzbaresArbeitsgasvolumen` (kWh); electricity consumers have no capacity column).
+  Generation kW, storage kWh and gas kW are different physical quantities — never added.
+  Known gap: the storage kWh column is empty in the 20260827 parse (`storage_units` /
+  AnlagenStromSpeicher table has 0 rows) — fills in on a re-parse, no code change.
+- **Contract category fields stay plain (user decision 2026-09-04, replacing the
+  2026-09-03 suffix idea):** `business_type` = contract vocabulary via the keyword map as
+  before; `business_subtype` = NULL for MaStR rows (never the technology, not the WZ). The
+  operator's WZ 2025 classification lives in the debug columns `mastr_wz_abschnitt` /
+  `mastr_wz_gruppe` / `mastr_wz_code` (3-digit group code from the Destatis WZ 2025
+  structure file `data/raw/wz2025/gliederung-wz2025.xlsx`, `MASTR_WZ2025_XLSX`, after label
+  normalisation + `MASTR_WZ_GROUP_ALIASES`; 274/287 labels exact, 100 % with aliases) and
+  is shown in the preview as its own `mastr_wz` line on every MaStR site, matched or not.
+  MaStR labels are WZ 2025 (22 sections A–V) — NOT WZ 2008.
+- **Category provenance (resolve):** `business_type_source` / `business_subtype_source`
+  (debug) record which member source supplied the value (singleton: its own source;
+  cluster: the highest-priority member with a value). The preview prints it after the
+  category: `works (osm)`.
+- Preview (`scripts/preview_layer.py`): MaStR row has one toggle per technology (a site
+  stays visible while ANY of its technologies is enabled); hover card has one
+  `mastr_technologies` block — one line per technology with every unit's fields verbatim
+  (several units → one indented line each, never summed; capped at 10 per technology, CSV
+  complete; no unit ids); `mastr_wz` line; category source tags; name search box above the
+  company list (case-insensitive substring on `name`, visible companies, results replace the
+  list); clicking a list row zooms to the company; clicking a site on the map pins its card
+  (another site replaces it, empty map closes it); names with a website are blue links
+  opening the site in a new tab.
 
 ### B6 Handelsregister (optional, `--include-hr`)
 Per PLZ in scope, ≤ 60 req/h, parse name / legal form / register number / court / seat →

@@ -1,5 +1,11 @@
 """Entity resolution: blocking + fuzzy name match + union-find — spec §A3.
 
+Vectorised (2026-09-04, todo item 2): candidate pairs come from an STRtree join of the
+rows' blocking-cell rectangles (same semantics as the former per-cell sweep: same cell or
+an 8-neighbour, polygons registering their capped footprint), names are scored with
+rapidfuzz's multithreaded pairwise scorer, containment with shapely.contains_xy, and
+clusters are assembled with a single groupby instead of a per-cluster Python loop.
+
 The same plant can appear in OSM *and* IED *and* Abwärme. Records match when they are
 ≤ 50 m apart and their normalized names reach token_sort_ratio ≥ 80 (or, when one record
 has a polygon containing the other's point, ratio ≥ 60). Clusters merge field-by-field in
@@ -9,11 +15,13 @@ from __future__ import annotations
 
 import datetime as _dt
 import re
+import time
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-from rapidfuzz import fuzz
+import shapely
+from rapidfuzz import fuzz, process
 
 from . import config, schema
 
@@ -63,45 +71,99 @@ def _priority(source: str) -> int:
         return len(config.SOURCE_PRIORITY)
 
 
-def _candidate_pairs(bounds: np.ndarray):
-    """Blocking: 100 m grid; each row registers in every cell its bbox covers.
-    Yields candidate index pairs (streaming — nothing is materialized).
+MAX_SPAN = 40   # cap cells per axis — a degenerate multi-km geometry registers coarsely
+QUERY_BATCH = 50_000
 
-    Points cover one cell; polygons cover their footprint. Registering the footprint
-    keeps the §A3 polygon-containment match reachable for large sites (refineries,
-    steelworks) whose representative point lies far from the contained point —
-    with centre-only blocking those pairs were never even considered.
+
+def _cell_boxes(bounds: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Blocking as metric rectangles. Each row registers in every BLOCK_GRID_M cell its
+    bbox covers (points: one cell; polygons: their footprint, capped at MAX_SPAN per
+    axis). Two rows are candidates when some cell of one is the same as, or an 8-neighbour
+    of, some cell of the other — i.e. their cell rectangles are within one cell of each
+    other. Returned: the cell rectangles (tree side) and the same rectangles dilated by one
+    cell (query side), both shrunk by a tiny epsilon so that rectangles two cells apart
+    only touch and do not count as intersecting.
     """
     cell = config.BLOCK_GRID_M
-    cx0 = np.floor(bounds[:, 0] / cell).astype(np.int64)
-    cy0 = np.floor(bounds[:, 1] / cell).astype(np.int64)
-    cx1 = np.floor(bounds[:, 2] / cell).astype(np.int64)
-    cy1 = np.floor(bounds[:, 3] / cell).astype(np.int64)
-    max_span = 40  # cap cells per axis — a degenerate multi-km geometry registers coarsely
-    grid: dict[tuple[int, int], list[int]] = {}
-    for i in range(len(bounds)):
-        for gx in range(cx0[i], min(cx1[i], cx0[i] + max_span) + 1):
-            for gy in range(cy0[i], min(cy1[i], cy0[i] + max_span) + 1):
-                grid.setdefault((gx, gy), []).append(i)
+    cx0 = np.floor(bounds[:, 0] / cell)
+    cy0 = np.floor(bounds[:, 1] / cell)
+    cx1 = np.minimum(np.floor(bounds[:, 2] / cell), cx0 + MAX_SPAN)
+    cy1 = np.minimum(np.floor(bounds[:, 3] / cell), cy0 + MAX_SPAN)
+    eps = cell * 1e-3
+    x0, y0 = cx0 * cell + eps, cy0 * cell + eps
+    x1, y1 = (cx1 + 1) * cell - eps, (cy1 + 1) * cell - eps
+    boxes = shapely.box(x0, y0, x1, y1)
+    queries = shapely.box(x0 - cell, y0 - cell, x1 + cell, y1 + cell)
+    return boxes, queries
 
-    # Streaming half-neighbourhood sweep: within-cell pairs plus four of the eight
-    # neighbour directions covers every unordered cell pair exactly once, with O(1)
-    # extra memory (a materialized pair set costs tens of GB at 4.5M rows). Rows
-    # registered in several cells (polygon footprints) can yield a pair twice —
-    # union-find is idempotent, so that only costs a duplicate ratio check.
-    half = ((1, 0), (0, 1), (1, 1), (1, -1))
-    for (gx, gy), members in grid.items():
-        for a in range(len(members)):
-            for b in range(a + 1, len(members)):
-                yield members[a], members[b]
-        for dx, dy in half:
-            other = grid.get((gx + dx, gy + dy))
-            if not other:
-                continue
-            for i in members:
-                for j in other:
-                    if i != j:
-                        yield i, j
+
+def _matching_edges(geom_m: gpd.GeoSeries, names: list[str], anchors: np.ndarray | None,
+                    is_poly: np.ndarray) -> np.ndarray:
+    """All (i, j) pairs (i < j) that satisfy the §A3 match rules — vectorised per batch:
+    STRtree rectangle join for candidates, rapidfuzz pairwise scoring on all cores,
+    numpy distance test, shapely contains_xy for the polygon-containment path."""
+    n = len(geom_m)
+    reps = geom_m.representative_point()
+    xs, ys = reps.x.to_numpy(), reps.y.to_numpy()
+    geoms = geom_m.to_numpy()
+    names_arr = np.array(names, dtype=object)
+    has_name = np.array([bool(nm) for nm in names], dtype=bool)
+    ok_row = has_name if anchors is None else (has_name & anchors)
+
+    boxes, queries = _cell_boxes(geom_m.bounds.to_numpy())
+    tree = shapely.STRtree(boxes)
+    edges: list[np.ndarray] = []
+    n_cand = 0
+    t0 = time.time()
+    for start in range(0, n, QUERY_BATCH):
+        stop = min(start + QUERY_BATCH, n)
+        qi, tj = tree.query(queries[start:stop], predicate="intersects")
+        i = qi + start
+        j = tj
+        keep = (j > i) & ok_row[i] & ok_row[j]      # each unordered pair once; §A3 gates
+        i, j = i[keep], j[keep]
+        n_cand += len(i)
+        if not len(i):
+            continue
+        ratio = process.cpdist(names_arr[i], names_arr[j], scorer=fuzz.token_sort_ratio,
+                               score_cutoff=config.DEDUP_POLYGON_NAME_RATIO, workers=-1)
+        sim = ratio >= config.DEDUP_POLYGON_NAME_RATIO
+        i, j, ratio = i[sim], j[sim], ratio[sim]
+        dist = np.hypot(xs[i] - xs[j], ys[i] - ys[j])
+        accept = (dist <= config.DEDUP_DISTANCE_M) & (ratio >= config.DEDUP_NAME_RATIO)
+        # remaining path needs containment: far pairs at any ratio ≥ 60, and close pairs
+        # whose ratio sits in [60, 80) — the polygon is the extra evidence (spec §A3)
+        rest = ~accept
+        if rest.any():
+            ri, rj = i[rest], j[rest]
+            contain = np.zeros(len(ri), dtype=bool)
+            pi = is_poly[ri]
+            if pi.any():
+                contain[pi] = shapely.contains_xy(geoms[ri[pi]], xs[rj[pi]], ys[rj[pi]])
+            pj = is_poly[rj] & ~contain
+            if pj.any():
+                contain[pj] = shapely.contains_xy(geoms[rj[pj]], xs[ri[pj]], ys[ri[pj]])
+            accept[np.flatnonzero(rest)[contain]] = True
+        if accept.any():
+            edges.append(np.stack([i[accept], j[accept]], axis=1))
+        if (start // QUERY_BATCH) % 20 == 19:
+            print(f"[resolve] {stop}/{n} rows blocked, {n_cand:,} candidate pairs, "
+                  f"{sum(len(e) for e in edges):,} matches, {time.time() - t0:.0f}s")
+    out = np.concatenate(edges) if edges else np.empty((0, 2), dtype=np.int64)
+    print(f"[resolve] {n_cand:,} candidate pairs → {len(out):,} matching pairs "
+          f"in {time.time() - t0:.0f}s")
+    return out
+
+
+def _components(n: int, edges: np.ndarray) -> np.ndarray:
+    """Connected components of the match graph → root = smallest member index."""
+    uf = _UnionFind(n)
+    for a, b in edges.tolist():
+        uf.union(a, b)
+    roots = np.fromiter((uf.find(k) for k in range(n)), dtype=np.int64, count=n)
+    smallest = np.full(n, n, dtype=np.int64)
+    np.minimum.at(smallest, roots, np.arange(n))
+    return smallest[roots]
 
 
 def resolve(frames: list[gpd.GeoDataFrame]) -> gpd.GeoDataFrame:
@@ -116,43 +178,23 @@ def resolve(frames: list[gpd.GeoDataFrame]) -> gpd.GeoDataFrame:
     if len(gdf) < n0:
         print(f"[resolve] dropped {n0 - len(gdf)} duplicate-id rows from overlapping extracts")
     gdf = gdf.reset_index(drop=True)
+    n = len(gdf)
 
     geom_m = gdf.geometry.to_crs(config.CRS_METRIC)
-    reps = geom_m.representative_point()
-    xs, ys = reps.x.to_numpy(), reps.y.to_numpy()
-    names = [normalize_name(n) for n in gdf["name"]]
+    names = [normalize_name(nm) for nm in gdf["name"]]
     is_poly = geom_m.geom_type.isin(["Polygon", "MultiPolygon"]).to_numpy()
 
     # rows geocoded only to postcode/city centroids must not anchor dedup (spec §B2):
     # dozens of companies share one centroid, so proximity there is meaningless
-    anchors = (gdf["dedup_anchor"].fillna(True).to_numpy()
+    anchors = (gdf["dedup_anchor"].fillna(True).to_numpy(dtype=bool)
                if "dedup_anchor" in gdf.columns else None)
 
-    uf = _UnionFind(len(gdf))
-    for i, j in _candidate_pairs(geom_m.bounds.to_numpy()):
-        if anchors is not None and not (anchors[i] and anchors[j]):
-            continue
-        if not names[i] or not names[j]:
-            continue  # never merge on geometry alone
-        ratio = fuzz.token_sort_ratio(names[i], names[j])
-        if ratio < config.DEDUP_POLYGON_NAME_RATIO:
-            continue
-        dist = float(np.hypot(xs[i] - xs[j], ys[i] - ys[j]))
-        if dist <= config.DEDUP_DISTANCE_M and ratio >= config.DEDUP_NAME_RATIO:
-            uf.union(i, j)
-            continue
-        # remaining path needs containment: far pairs at any ratio ≥ 60, and close
-        # pairs whose ratio sits in [60, 80) — the polygon is the extra evidence
-        # (spec §A3: containment relaxes the name threshold, regardless of distance)
-        if ((is_poly[i] and geom_m.iloc[i].contains(reps.iloc[j]))
-                or (is_poly[j] and geom_m.iloc[j].contains(reps.iloc[i]))):
-            uf.union(i, j)
-
-    roots = np.array([uf.find(i) for i in range(len(gdf))])
-    gdf["_root"] = roots
+    edges = _matching_edges(geom_m, names, anchors, is_poly)
+    roots = _components(n, edges)
+    size = np.bincount(roots, minlength=n)[roots]
+    singleton_mask = size == 1
     gdf["merged_at"] = merged_at
 
-    singleton_mask = pd.Series(roots).groupby(roots).transform("size").to_numpy() == 1
     # provenance of the category fields (which member supplied the value) — for a
     # singleton that is its own source; for clusters it is recorded below
     singles = gdf[singleton_mask].copy()
@@ -162,40 +204,43 @@ def resolve(frames: list[gpd.GeoDataFrame]) -> gpd.GeoDataFrame:
     out_rows = [singles]
 
     fill_cols = [c for c in gdf.columns
-                 if c not in ("geometry", "_root", "source", "source_count", "merged_at")]
+                 if c not in ("geometry", "source", "source_count", "merged_at")]
 
-    cluster_records = []
-    cluster_geoms = []
-    for _, cluster in gdf[~singleton_mask].groupby("_root"):
-        order = sorted(cluster.index, key=lambda idx: _priority(cluster.at[idx, "source"]))
-        ranked = cluster.loc[order]
-        record: dict = {}
-        for col in fill_cols:
-            non_null = ranked[col].dropna()
-            record[col] = non_null.iloc[0] if len(non_null) else pd.NA
-            if col in PROVENANCE_COLS:
-                record[col + "_source"] = (
-                    ranked.at[non_null.index[0], "source"] if len(non_null) else pd.NA)
-        sources = sorted({s for src in ranked["source"] for s in str(src).split("+")})
-        record["source"] = "+".join(sources)
-        record["source_count"] = len(sources)
-        record["merged_at"] = merged_at
-        record["member_ids"] = "|".join(ranked["id"].astype(str))
-        poly_members = ranked[ranked.geometry.geom_type.isin(["Polygon", "MultiPolygon"])]
-        geom = poly_members.geometry.iloc[0] if len(poly_members) else ranked.geometry.iloc[0]
-        cluster_records.append(record)
-        cluster_geoms.append(geom)
-
-    if cluster_records:
-        clusters = gpd.GeoDataFrame(cluster_records, geometry=cluster_geoms, crs=gdf.crs)
+    if not singleton_mask.all():
+        # rank members within each cluster by SOURCE_PRIORITY (stable on original order),
+        # then take the first non-null value per column — vectorised groupby, no per-
+        # cluster Python loop (that loop cost ~15 ms per cluster: 44 h on the DE table)
+        multi = gdf[~singleton_mask].copy()
+        multi["_root"] = roots[~singleton_mask]
+        multi["_prio"] = [_priority(s) for s in multi["source"]]
+        multi["_idx"] = np.flatnonzero(~singleton_mask)
+        multi["_ispoly"] = is_poly[~singleton_mask]
+        ranked = multi.sort_values(["_root", "_prio", "_idx"], kind="stable")
+        plain = pd.DataFrame(ranked.drop(columns="geometry"))
+        grp = plain.groupby("_root", sort=True)
+        clusters = grp[fill_cols].first()          # first non-null in priority order
+        for col in PROVENANCE_COLS:
+            src = plain.loc[plain[col].notna()].groupby("_root")["source"].first()
+            clusters[col + "_source"] = src.reindex(clusters.index).astype("string")
+        clusters["source"] = grp["source"].agg(
+            lambda s: "+".join(sorted({x for src in s for x in str(src).split("+")})))
+        clusters["source_count"] = clusters["source"].str.count(r"\+") + 1
+        clusters["merged_at"] = merged_at
+        clusters["member_ids"] = grp["id"].agg(lambda s: "|".join(map(str, s)))
+        # geometry: first polygon member in priority order, else the first member's point
+        by_geom = ranked.sort_values(["_root", "_ispoly", "_prio", "_idx"],
+                                     ascending=[True, False, True, True], kind="stable")
+        pick = by_geom.groupby("_root", sort=True)["_idx"].first()
+        geoms = gdf.geometry.iloc[pick.to_numpy()].to_numpy()
+        clusters = gpd.GeoDataFrame(clusters.reset_index(drop=True), geometry=geoms, crs=gdf.crs)
         reps4326 = clusters.geometry.representative_point()
         clusters["longitude"] = reps4326.x
         clusters["latitude"] = reps4326.y
         out_rows.append(clusters)
 
     out = pd.concat(out_rows, ignore_index=True)
-    out = gpd.GeoDataFrame(out.drop(columns=["_root"], errors="ignore"),
-                           geometry="geometry", crs=gdf.crs)
+    out = gpd.GeoDataFrame(out.drop(columns=["_root", "_prio", "_idx", "_ispoly"],
+                                    errors="ignore"), geometry="geometry", crs=gdf.crs)
     out = schema.conform(out)
     schema.validate_frame(out, source="merged")
     return out

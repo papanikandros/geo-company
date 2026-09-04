@@ -106,26 +106,28 @@ business emails only (GDPR).
    pin `date=` and keep a `.bak` of the export outside that dir.
 4. Spell out every abbreviation on first use.
 
-## Status snapshot (2026-08-30 — details in Claude's project memory)
+## Status snapshot (2026-09-04 — details in Claude's project memory)
 
-- A0–A5 + B1 (IED) + B2 (Abwärme/PfA) + B3 (Overture) done: DE table 4 083 494 companies,
-  4 sources, 320 726 multi-source clusters. B4 (Foursquare) deferred as redundant.
-- **B5 (MaStR) kW floor (decision 2026-08-31):** only units ≥ 50 kW are searched/mapped (PV + storage ≥ 100 kW) — MaStR's own coordinate-publication thresholds; sub-threshold units are households, never in the Company table. Data present since 2026-08-31 (see memory).
-- **B5 (MaStR): code complete + tested; DATA MISSING** (stale — see line above) — one verified 3.16 GB fetch of
-  `Gesamtdatenexport_20260827` pending user go (golden rule 3!). Fetch:
-  `data/raw/mastr/segfetch3.sh` (proven; only-206 + CRC-verified → then `cp` a `.bak`
-  outside `~/.open-MaStR/`). Parse: `data/raw/mastr/download_probe.py` (date-pinned).
-  Open question: `business_type` for consumer-only sites. B5 files are deliberately
-  uncommitted: `sources/mastr.py`, `tests/test_mastr.py`, and the MaStR blocks in
-  `config.py`/`pipeline.py` (worktree mods vs committed B5-free versions — do not revert).
-- Git: history committed 2026-08-30 (7 commits: baseline → core A0-A5 → B1 → B2 → B3 →
-  preview → docs); user makes every commit, Claude stages and shows messages inline.
+- A0–A5 + B1 (IED) + B2 (Abwärme/PfA) + B3 (Overture) + B5 (MaStR, B5.1 refactor) done:
+  DE table **4 164 518 companies**, 5 sources, 327 695 multi-source clusters, 60 five-source
+  clusters. B4 (Foursquare) deferred as redundant.
+- **B5 MaStR:** data present since 2026-08-31 (`data/raw/mastr/mastr.db`, 11 GB, zip + .bak
+  kept); kW floors ≥ 50 kW (PV/storage ≥ 100 kW); B5.1 (2026-09-04): per-unit
+  `mastr_tech_detail`, no kW sums; `business_subtype` NULL; WZ 2025 in `mastr_wz_*` +
+  `mastr_wz_code` (Destatis file `data/raw/wz2025/`). Known gap: storage kWh empty in the
+  20260827 parse (`storage_units` table has 0 rows → local re-parse of AnlagenStromSpeicher).
+- **Resolve engine vectorised 2026-09-04:** DE merge 44.6 h → ~2.5 min end to end, output
+  identical (see queue item 2). Reference copies of the previous DE merge:
+  `companies_merged_DE_pre_b51_*` (delete when no longer needed).
+- Git: user makes every commit; Claude stages code + CLAUDE.md only (never spec/plan .md).
   Untracked-by-decision: old consumer scripts (`scripts/build_*`, `app_bokeh_companies.py`),
   plan .md files, `.commit-messages/`, `.playwright-mcp/`.
 - Canonical preview: `data/previews/companies_merged_DE_industrial.html` — regenerate with
   `uv run --extra viz python scripts/preview_layer.py data/geoextract/companies_merged_DE_4326.parquet
   --states hamburg,schleswig-holstein --out data/previews/companies_merged_DE_industrial.html`
-  (full data, never sampled; per-dataset toggle rows).
+  (full data, never sampled; per-dataset toggle rows, MaStR per-technology toggles, name
+  search, pinned cards, website links). ~16–40 MB: too big for SendUserFile, share via
+  `python3 -m http.server` + ngrok from `data/previews/` (keep only that file there).
 
 ## Todo queue (ordered — user decisions 2026-09-03; this order is authoritative)
 
@@ -139,13 +141,15 @@ needs its own go with the volume stated first (golden rule 3).
    `35.1 Elektrizitätsversorgung` via `data/raw/wz2025/gliederung-wz2025.xlsx`; preview:
    singular tech toggles, per-tech hover, name search, click-to-zoom). Adapter + tests +
    Bremen check first; the DE re-run waits for item 2.
-2. **Resolve-stage speedups — MUST precede any DE re-run** (many re-runs expected):
-   parallel candidate-pair sweep over grid cells (process pool, 14 cores) + vectorized
-   cluster assembly (groupby-first by source priority instead of the per-cluster Python
-   loop). Target: DE merge from ~2.5 h to well under 30 min, identical output (assert
-   cluster-for-cluster equality against the previous merge on Bremen and DE).
-3. **DE re-run + canonical preview**, then the `phase(B5)` commit (user) with the spec
-   status block amended for B5.1 and the stale status snapshot in this file refreshed.
+2. **Resolve-stage speedups — DONE 2026-09-04** (`resolve.py`: STRtree rectangle join for
+   candidate pairs, rapidfuzz cpdist on all cores, shapely contains_xy, array union-find,
+   one sorted groupby for cluster assembly). Cluster-for-cluster identical to the former
+   loops: Bremen 37 349 rows and DE 4 164 518 rows, all member sets + geometries equal.
+   Resolve time DE 160 560 s (44.6 h) → 88 s; Bremen 61 s → 0.7 s. A full DE re-run is now
+   ~2.5 min (resolve 88 s + geography 23 s + I/O).
+3. **DE re-run + canonical preview — DONE 2026-09-04** (4 164 518 companies, MaStR B5.1
+   columns in, preview for Hamburg + Schleswig-Holstein regenerated). Left for the user:
+   the resolve commit (`.commit-messages/resolve-speedups.txt`).
 4. **Industrial-signal 3-parter** (approved earlier): OSM power inflation, Overture
    subtype → industrial override (67 subtypes hidden under office), drop
    geographic_entities.
