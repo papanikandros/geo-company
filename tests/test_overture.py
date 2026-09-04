@@ -7,6 +7,23 @@ VALID_TYPES = {"office", "shop", "craft", "industrial", "amenity", "man_made", "
 
 def test_root_mapping_targets_contract_business_types():
     assert set(config.OVERTURE_ROOT_TYPES.values()) <= VALID_TYPES
+    assert set(config.OVERTURE_SUBTYPE_TYPES.values()) <= VALID_TYPES
+
+
+def test_apply_taxonomy_slug_override_and_drop_roots():
+    import pandas as pd
+    from geoextract.sources import overture
+    df = pd.DataFrame({
+        "business_subtype": ["chemical_plant", "lawyer", "energy_company", "lake", None],
+        "ovt_root": ["services_and_business", "services_and_business",
+                     "services_and_business", "geographic_entities", None],
+    })
+    out = overture.apply_taxonomy(df)
+    assert len(out) == 4                                   # the lake is gone
+    assert out.business_type.tolist()[:3] == ["industrial", "office", "power"]
+    assert pd.isna(out.business_type.iloc[3])               # no root → NA, logged
+    assert out.ovt_category.tolist()[:3] == ["chemical_plant", "lawyer", "energy_company"]
+    assert (out.business_subtype.iloc[:3] == out.ovt_category.iloc[:3]).all()
 
 
 def test_observed_roots_are_covered():

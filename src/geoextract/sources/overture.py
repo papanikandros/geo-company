@@ -9,11 +9,17 @@ in the low-GB range).
 
 Filters (decided 2026-08-26): named places only, Overture confidence ≥ 0.5, country DE
 or unset, not marked closed. `business_type` comes from a pure mapping of Overture's own
-taxonomy ROOT (config.OVERTURE_ROOT_TYPES); the specific category slug goes to
-`business_subtype`; unmapped roots stay NA and are logged. The adapter does NOT do
-entity resolution itself.
+taxonomy: the category slug first (config.OVERTURE_SUBTYPE_TYPES — Overture has no
+industrial root, its manufacturing/utility/waste categories sit under services_and_business;
+todo item 4b, 2026-09-04), else the ROOT (config.OVERTURE_ROOT_TYPES); the slug goes to
+`business_subtype`; unmapped roots stay NA and are logged. Roots in
+config.OVERTURE_DROP_ROOTS (geographic_entities) are dropped — not businesses (item 4c).
+The mapping is re-applied on every cache load (cheap, no S3 re-scan) so mapping-table
+edits never need a new download. The adapter does NOT do entity resolution itself.
 
-Debug columns: ovt_confidence, ovt_dataset (provenance), ovt_root, ovt_brand_wikidata.
+Debug columns: ovt_confidence, ovt_dataset (provenance), ovt_root, ovt_category (the raw
+slug, kept even when a merge partner wins business_subtype — §6.5 reads it),
+ovt_brand_wikidata.
 """
 from __future__ import annotations
 
@@ -55,14 +61,39 @@ WHERE bbox.xmin BETWEEN {lon0} AND {lon1}
 """
 
 
+def apply_taxonomy(df: pd.DataFrame) -> pd.DataFrame:
+    """business_type from the category slug (override table) else the taxonomy root;
+    drop non-business roots. Pure mapping, idempotent — applied after the S3 scan and
+    again on every cache load."""
+    df = df.copy()
+    n0 = len(df)
+    df = df[~df["ovt_root"].isin(config.OVERTURE_DROP_ROOTS)].reset_index(drop=True)
+    if len(df) < n0:
+        print(f"[overture] dropped {n0 - len(df)} non-business rows "
+              f"(roots {sorted(config.OVERTURE_DROP_ROOTS)})")
+    slug = df["business_subtype"].astype("string")
+    by_slug = slug.map(config.OVERTURE_SUBTYPE_TYPES)
+    by_root = df["ovt_root"].map(config.OVERTURE_ROOT_TYPES)
+    df["business_type"] = by_slug.where(by_slug.notna(), by_root).astype("string")
+    df["ovt_category"] = slug
+    n_override = int(by_slug.notna().sum())
+    print(f"[overture] category override: {n_override} rows typed by slug "
+          f"({by_slug.value_counts().to_dict()})")
+    unmapped = df.loc[df["business_type"].isna(), "ovt_root"].value_counts().head(8)
+    if len(unmapped):
+        print(f"[overture] taxonomy roots without business_type mapping: "
+              f"{unmapped.to_dict()}")
+    return df
+
+
 def extract_overture(data_root: Path, force: bool = False,
                      bbox: tuple[float, float, float, float] | None = None,
                      scope: str = "DE") -> gpd.GeoDataFrame:
-    """DuckDB S3 scan → canonical frame; cached per scope."""
+    """DuckDB S3 scan → canonical frame; cached per scope (mapping re-applied on load)."""
     dest = paths.source_parquet(data_root, "overture", scope)
     if dest.exists() and not force:
         print(f"[skip] {dest.name} exists")
-        return gpd.read_parquet(dest)
+        return schema.conform(gpd.GeoDataFrame(apply_taxonomy(gpd.read_parquet(dest))))
 
     import duckdb
     con = duckdb.connect()
@@ -71,11 +102,7 @@ def extract_overture(data_root: Path, force: bool = False,
     print(f"[overture] release {config.OVERTURE_RELEASE}: {len(df)} named places "
           f"(confidence ≥ {config.OVERTURE_MIN_CONFIDENCE})")
 
-    df["business_type"] = df["ovt_root"].map(config.OVERTURE_ROOT_TYPES)
-    unmapped = df.loc[df["business_type"].isna(), "ovt_root"].value_counts().head(8)
-    if len(unmapped):
-        print(f"[overture] taxonomy roots without business_type mapping: "
-              f"{unmapped.to_dict()}")
+    df = apply_taxonomy(df)
 
     # region carries plain state names for Foursquare/Microsoft rows; Meta rows are
     # empty — the merge's geography stage fills those spatially later
@@ -89,7 +116,7 @@ def extract_overture(data_root: Path, force: bool = False,
     df["source"] = "overture"
     for col in ("name", "business_subtype", "website", "email", "phone",
                 "address_street", "address_postcode", "address_city", "state",
-                "ovt_root", "ovt_dataset", "ovt_brand_wikidata"):
+                "ovt_root", "ovt_category", "ovt_dataset", "ovt_brand_wikidata"):
         df[col] = df[col].astype("string")
 
     gdf = gpd.GeoDataFrame(

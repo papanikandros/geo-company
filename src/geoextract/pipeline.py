@@ -80,11 +80,17 @@ def apply_geography(gdf: gpd.GeoDataFrame, bounds: gpd.GeoDataFrame,
 
 
 def apply_intrinsic_industrial(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """§6.5 intrinsic industrial signal (pre-classifier): sources and OSM tag sets."""
+    """§6.5 intrinsic industrial signal (pre-classifier): register sources, OSM tag sets
+    (power=generator/substation only for NAMED rows — item 4a), Overture industrial/power
+    category slugs (item 4b)."""
     gdf = gdf.copy()
+    ovt_signal_types = {"industrial", "power"}
 
-    def _row_signal(source, tags_json) -> bool:
+    def _row_signal(source, tags_json, name, ovt_category) -> bool:
         if any(s in config.INDUSTRIAL_SOURCES for s in str(source).split("+")):
+            return True
+        if isinstance(ovt_category, str) and \
+                config.OVERTURE_SUBTYPE_TYPES.get(ovt_category) in ovt_signal_types:
             return True
         if isinstance(tags_json, str) and tags_json:
             try:
@@ -94,12 +100,20 @@ def apply_intrinsic_industrial(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
             for key, values in config.INDUSTRIAL_TAGS.items():
                 if str(tags.get(key)) in values:
                     return True
+            if isinstance(name, str) and name.strip():
+                for key, values in config.INDUSTRIAL_TAGS_NAMED_ONLY.items():
+                    if str(tags.get(key)) in values:
+                        return True
         return False
 
-    tags_col = gdf["osm_tags"] if "osm_tags" in gdf.columns else pd.Series(
-        [None] * len(gdf), index=gdf.index)
+    def _col(name):
+        return gdf[name] if name in gdf.columns else pd.Series([None] * len(gdf), index=gdf.index)
+
     signal = [
-        _row_signal(src, tj) for src, tj in zip(gdf["source"], tags_col)
+        _row_signal(src, tj, nm, oc)
+        for src, tj, nm, oc in zip(gdf["source"], _col("osm_tags"),
+                                   _col("name").astype(object).where(_col("name").notna(), None),
+                                   _col("ovt_category").astype(object).where(_col("ovt_category").notna(), None))
     ]
     gdf["is_industrial"] = pd.array(signal, dtype="boolean")
     return gdf

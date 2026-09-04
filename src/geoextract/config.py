@@ -143,6 +143,56 @@ OVERTURE_ROOT_TYPES = {
     "industrial": "industrial",
     "manufacturing": "industrial",
 }
+# Taxonomy roots that are not businesses at all — dropped in the adapter (todo item 4c,
+# 2026-09-04): lakes, rivers, mountains, bridges, beaches … (19 307 DE rows).
+OVERTURE_DROP_ROOTS = {"geographic_entities"}
+# Category-slug override consulted BEFORE the root mapping (todo item 4b, 2026-09-04).
+# Overture has no industrial taxonomy root: its manufacturing / processing / extraction /
+# utility / waste / logistics categories sit under services_and_business (→ office) or
+# community_and_government (→ amenity). Pure slug → business_type mapping, still no
+# per-row classification. Rows hitting this table also carry the §6.5 intrinsic
+# industrial signal (they have no OSM tags to carry it otherwise).
+OVERTURE_SUBTYPE_TYPES: dict[str, str] = {
+    # manufacturing & processing (NACE C)
+    "industrial_equipment": "industrial", "metal_supplier": "industrial",
+    "business_manufacturing_and_supply": "industrial", "metal_fabricator": "industrial",
+    "commercial_industrial": "industrial", "industrial_company": "industrial",
+    "plastic_company": "industrial", "plastic_manufacturer": "industrial",
+    "machine_shop": "industrial", "chemical_plant": "industrial",
+    "masonry_concrete": "industrial", "jewelry_and_watches_manufacturer": "industrial",
+    "jewelry_manufacturer": "industrial", "auto_manufacturers_and_distributors": "industrial",
+    "pharmaceutical_companies": "industrial", "furniture_manufacturers": "industrial",
+    "appliance_manufacturer": "industrial", "welders": "industrial",
+    "b2b_machinery_and_tools": "industrial", "wood_and_pulp": "industrial",
+    "leather_products_manufacturer": "industrial", "biotechnology_company": "industrial",
+    "glass_manufacturer": "industrial", "b2b_rubber_and_plastics": "industrial",
+    "saw_mill": "industrial", "mattress_manufacturing": "industrial",
+    "metal_plating_service": "industrial", "steel_fabricators": "industrial",
+    "aircraft_manufacturer": "industrial", "paper_mill": "industrial",
+    "textile_mill": "industrial", "casting_molding_and_machining": "industrial",
+    "packaging_contractors_and_service": "industrial",
+    "metal_materials_and_experts": "industrial", "motorcycle_manufacturer": "industrial",
+    "sheet_metal": "industrial", "plastic_injection_molding_workshop": "industrial",
+    "flour_mill": "industrial", "mills": "industrial", "commercial_printer": "industrial",
+    "coal_and_coke": "industrial",
+    # extraction & refining (NACE B / C19)
+    "mining": "industrial", "oil_and_gas": "industrial", "oil_refiners": "industrial",
+    "oil_and_gas_field_equipment_and_services": "industrial",
+    "b2b_oil_and_gas_extraction_and_services": "industrial",
+    "b2b_energy_and_mining": "industrial",
+    # water, waste, recycling (NACE E)
+    "water_treatment_equipment_and_services": "industrial",
+    "b2b_cleaning_and_waste_management": "industrial", "recycling_center": "industrial",
+    "scrap_metals": "industrial", "hazardous_waste_disposal": "industrial",
+    "industrial_cleaning_services": "industrial",
+    # logistics depots (OSM counts warehouse/depot/port/railway as industrial, §6.5)
+    "warehouses": "industrial", "freight_and_cargo_service": "industrial",
+    "railroad_freight": "industrial", "motor_freight_trucking": "industrial",
+    # energy supply (NACE D)
+    "energy_company": "power", "power_plants_and_power_plant_service": "power",
+    "wind_energy": "power", "electric_utility_provider": "power",
+    "public_utility_company": "power",
+}
 
 # --- MaStR — Marktstammdatenregister (spec §B5, source catalogue #6) --------------------
 # BNetzA bulk export via open-mastr into data/raw/mastr/mastr.db (sqlite). Units in
@@ -332,8 +382,15 @@ INDUSTRIAL_TAGS: dict[str, set[str]] = {
     },
     "industrial": {"factory", "oil", "mine", "warehouse", "port", "scrap_yard",
                    "slaughterhouse", "depot"},
-    "power": {"plant", "generator", "substation"},
+    "power": {"plant"},
     "craft": {"metal_construction", "electronics", "joinery"},
+}
+# Tags that count only when the row has a NAME (user decision 2026-09-04, todo item 4a):
+# anonymous rooftop panels (power=generator, 277 k solar) and street cabinets
+# (power=substation minor_distribution) are infrastructure objects, not companies. A
+# register merge (INDUSTRIAL_SOURCES) makes the row industrial regardless.
+INDUSTRIAL_TAGS_NAMED_ONLY: dict[str, set[str]] = {
+    "power": {"generator", "substation"},
 }
 INDUSTRIAL_NACE_SECTIONS = {"B", "C", "D", "E", "F"}
 

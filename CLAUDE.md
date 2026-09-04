@@ -109,8 +109,8 @@ business emails only (GDPR).
 ## Status snapshot (2026-09-04 — details in Claude's project memory)
 
 - A0–A5 + B1 (IED) + B2 (Abwärme/PfA) + B3 (Overture) + B5 (MaStR, B5.1 refactor) done:
-  DE table **4 164 518 companies**, 5 sources, 327 695 multi-source clusters, 60 five-source
-  clusters. B4 (Foursquare) deferred as redundant.
+  DE table **4 145 466 companies** (2026-09-04, after item 4), 5 sources, `is_industrial`
+  370 050. B4 (Foursquare) deferred as redundant.
 - **B5 MaStR:** data present since 2026-08-31 (`data/raw/mastr/mastr.db`, 11 GB, zip + .bak
   kept); kW floors ≥ 50 kW (PV/storage ≥ 100 kW); B5.1 (2026-09-04): per-unit
   `mastr_tech_detail`, no kW sums; `business_subtype` NULL; WZ 2025 in `mastr_wz_*` +
@@ -150,9 +150,15 @@ needs its own go with the volume stated first (golden rule 3).
 3. **DE re-run + canonical preview — DONE 2026-09-04** (4 164 518 companies, MaStR B5.1
    columns in, preview for Hamburg + Schleswig-Holstein regenerated). Left for the user:
    the resolve commit (`.commit-messages/resolve-speedups.txt`).
-4. **Industrial-signal 3-parter** (approved earlier): OSM power inflation, Overture
-   subtype → industrial override (67 subtypes hidden under office), drop
-   geographic_entities.
+4. **Industrial-signal 3-parter — DONE 2026-09-04** (spec §6.5 + §B3 amended):
+   a. `power=generator/substation` count only for NAMED rows (`INDUSTRIAL_TAGS_NAMED_ONLY`),
+      `power=plant` unconditional → OSM-only power rows flagged 419 932 → 32 521.
+   b. Overture slug override `OVERTURE_SUBTYPE_TYPES` (~65 → industrial, 5 → power; 74 001 DE
+      rows re-typed) + debug `ovt_category` feeding the §6.5 signal; mapping re-applied on
+      every cache load. `business_type=industrial` 30 418 → 94 050.
+   c. Root `geographic_entities` dropped in the adapter (19 307 rows).
+   DE table 4 164 518 → **4 145 466** companies; `is_industrial` 700 932 → **370 050**
+   (105 627 register-backed). `man_made` structures (155 k) knowingly kept for now.
 5. **Entity-resolution normalization pass** (prerequisite for 6 and for Splink): umlauts/ß,
    legal-form suffixes (GmbH, GmbH & Co. KG, e.K., …), Straße/Str. variants; then the
    Splink-vs-heuristic benchmark on Bremen and cluster-wide one-to-one matching.
@@ -181,6 +187,11 @@ needs its own go with the volume stated first (golden rule 3).
      Destatis 2008 → 2025 Umsteigeschlüssel (xlsx, ~176 KB, download needs go).
 8. **E1** tests / README / CI; then validation layers (sEEnergies/Hotmaps, Overture
    overlap stats, density QA) as time allows.
+9. **Later: deployment of the merged table to Cloudflare KV** (user idea 2026-09-04) — serve
+   the company data from an edge key-value store so the map/API reads are ultra fast.
+   Think through first: key design (per company id vs. per grid cell / district tiles),
+   the 25 MB per-value limit (the DE table is ~700 MB → must be sharded), update flow after
+   each re-run, and whether the Bokeh consumer needs a different reader.
 
 ## Research todos (moved from research-todos.md, 2026-08-31)
 
