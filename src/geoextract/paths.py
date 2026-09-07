@@ -57,6 +57,17 @@ def summary_json(root: Path, scope: str) -> Path:
     return _ensured(root / "geoextract" / f"companies_merged_{scope}_summary.json")
 
 
+def register_dir(root: Path) -> Path:
+    """Stage 0 register tables (item 6): hr_companies / hr_names parquet per source."""
+    d = root / "geoextract" / "register"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def register_parquet(root: Path, name: str) -> Path:
+    return register_dir(root) / f"{name}.parquet"
+
+
 def classify_dir(root: Path) -> Path:
     d = root / "geoextract" / "classify"
     d.mkdir(parents=True, exist_ok=True)

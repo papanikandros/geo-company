@@ -392,6 +392,76 @@ LEGAL_FORM_SUFFIXES = [
 
 SOURCE_PRIORITY = ["osm", "ied", "abwaerme", "mastr", "overture", "fsq", "handelsregister"]
 
+# --- Register + website pipeline (queue item 6, register-website-pipeline-plan.md) ----------
+# Stage 0a–0c: bulk register files (never the 60 req/h portal). Paths relative to the data root.
+HR2022_DB = "raw/handelsregister/handelsregister.db"        # offeneregister.de, 2022-10-21, CC-BY 4.0
+HR2022_SNAPSHOT = "2022-08-01"                               # last announcement date in the file
+HR2019_JSONL = "raw/handelsregister/de_companies_ocdata.jsonl.bz2"   # OpenCorporates/OKFN, CC-BY 4.0
+HR2019_SNAPSHOT = "2019-01-31"
+GLEIF_ZIP_GLOB = "raw/gleif/*-gleif-goldencopy-lei2-golden-copy.csv.zip"   # GLEIF golden copy, CC0
+GLEIF_COUNTRY = "DE"
+REGISTER_ATTRIBUTION = (
+    "Handelsregister data: OffeneRegister.de (Open Knowledge Foundation Deutschland) and "
+    "OpenCorporates, CC-BY 4.0; GLEIF LEI golden copy, CC0."
+)
+
+# Stage 0d: website hygiene. `website` keeps the company's OWN site (or its chain's site);
+# directory listings, social profiles and parcel-network pages move to `website_listing`.
+WEBSITE_DIRECTORY_HOSTS = {
+    "gelbeseiten.de", "11880.com", "dasoertliche.de", "dastelefonbuch.de", "goyellow.de",
+    "cylex.de", "cylex-branchenbuch.de", "meinestadt.de", "yelp.de", "yelp.com", "golocal.de",
+    "stadtbranchenbuch.com", "branchenbuch24.com", "firmenwissen.de", "northdata.de",
+    "northdata.com", "unternehmensregister.de", "handelsregister.de", "companyhouse.de",
+    "kununu.com", "wikipedia.org", "wikidata.org", "parkopedia.de", "parkopedia.com",
+    "google.com", "google.de", "goo.gl", "maps.app.goo.gl", "bing.com", "tripadvisor.de",
+    "tripadvisor.com", "booking.com", "hrs.de", "lieferando.de", "jameda.de", "doctolib.de",
+    "sanego.de", "immobilienscout24.de", "kleinanzeigen.de", "ebay-kleinanzeigen.de",
+    "openstreetmap.org", "osm.org", "wheelmap.org", "foursquare.com", "opentable.de",
+    "quandoo.de", "thefork.de", "speisekarte.de", "restaurant-kritik.de", "marktplatz-mittelstand.de",
+    "wer-zu-wem.de", "dialo.de", "hotfrog.de", "yellowmap.de", "branchen-info.net",
+    # confirmed on the DE table 2026-09-07 (learned rule + name sample)
+    "sellwerk.de", "mon.de", "webadresse.de", "kosmetikstudios-24.de", "studiobookr.com",
+    "planity.com", "treatwell.de", "kinderaerzte-im-netz.de", "arzt-auskunft.de",
+    "wonderl.ink", "bit.ly", "tinyurl.com", "florist.fleurop.de",
+}
+# host-label tokens too generic to prove a brand ("huk-vor-ort" → only "huk" counts)
+WEBSITE_BRAND_STOP_TOKENS = {
+    "de", "com", "net", "org", "eu", "www", "online", "vor", "ort", "agentur", "betreuer",
+    "shop", "portal", "web", "service", "filialen", "standorte", "stores", "store", "hotel",
+    "hotels", "markt", "maerkte", "gesundheit", "group", "gruppe", "info", "app", "home",
+    "mein", "meine", "dein", "deine", "unser",
+}
+# hosts that fall under a directory parent but are genuinely a company's own site
+WEBSITE_OWN_HOST_EXCEPTIONS = {"sites.google.com", "business.site", "jimdosite.com", "jimdofree.com"}
+# operator / agent networks whose per-location pages ARE the company's official presence but
+# whose names rarely carry the host label (confirmed on the DE table 2026-09-07)
+WEBSITE_CHAIN_HOSTS = {
+    "dvag.de", "allfinanz-dvag.de", "korian.de", "all.accor.com", "ihg.com",
+    "helios-gesundheit.de", "axa-betreuer.de", "huk-vor-ort.de", "signal-iduna-agentur.de",
+    "vertretung.allianz.de", "agentur.lvm.de", "agentur.barmenia.de", "wuerttembergische.de",
+    "ruv.de", "vlh.de", "johanniter.de", "drk.de", "malteser.de", "awo.org", "caritas.de",
+    "diakonie.de", "asb.de", "fressnapf.de", "tedi.com", "kik.de", "nkd.com",
+}
+WEBSITE_SOCIAL_HOSTS = {
+    "facebook.com", "fb.com", "fb.me", "instagram.com", "linktr.ee", "twitter.com", "x.com",
+    "linkedin.com", "xing.com", "youtube.com", "youtu.be", "tiktok.com", "pinterest.com",
+    "pinterest.de", "threads.net", "wa.me", "whatsapp.com", "t.me", "telegram.me", "vimeo.com",
+    "flickr.com", "tumblr.com", "snapchat.com", "twitch.tv", "discord.gg", "discord.com",
+    "facebook.de", "m.me",
+}
+WEBSITE_PARCEL_HOSTS = {
+    "paketshop.myhermes.de", "myhermes.de", "dpd.com", "gls-pakete.de", "gls-group.eu",
+    "ups.com", "fedex.com", "packstation.de",
+}
+# learned rules on the merged table: a host shared by many rows is a chain (kept in `website`)
+# unless it looks like a directory — many distinct names whose keys do not contain the host's
+# brand label (gelbeseiten.de: 104 903 rows / 102 779 names; edeka.de: 7 332 rows, brand in name)
+WEBSITE_CHAIN_MIN_ROWS = 20
+WEBSITE_DIRECTORY_MIN_ROWS = 100
+WEBSITE_DIRECTORY_NAME_RATIO = 0.9      # distinct names / rows
+WEBSITE_DIRECTORY_MAX_BRAND_SHARE = 0.3  # share of name keys containing the brand label
+WEBSITE_TRACKING_PARAMS = ("utm_", "fbclid", "gclid", "mc_cid", "mc_eid", "ref")
+
 # --- Confidence score weights (spec §5.4) -----------------------------------------------
 CONFIDENCE_WEIGHTS = {
     "multi_source": 0.30,

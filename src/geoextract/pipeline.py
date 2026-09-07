@@ -11,9 +11,10 @@ import pandas as pd
 from . import area, boundaries, config, download, export, paths, resolve
 from .sources import abwaerme as abwaerme_source
 from .sources import ied as ied_source
-from .sources import osm as osm_source
 from .sources import mastr as mastr_source
+from .sources import osm as osm_source
 from .sources import overture as overture_source
+from .web import hygiene as web_hygiene
 
 
 def _resolve_states(states: str) -> list[str]:
@@ -214,12 +215,43 @@ def run_extract(states: str, sources: str, data_dir=None, skip_download: bool = 
         pd.concat(zones_parts, ignore_index=True), crs=config.CRS_STORAGE)
     merged = apply_geography(merged, bounds_all, zones_all)
     merged = apply_intrinsic_industrial(merged)
-    merged = resolve.compute_confidence(merged)
     runtimes["geography"] = time.time() - t0
+
+    t0 = time.time()   # item 6 stage 0d: own sites only in `website` BEFORE confidence
+    merged = web_hygiene.apply_hygiene(merged)
+    merged = resolve.compute_confidence(merged)
+    runtimes["web_hygiene"] = time.time() - t0
+    rep = web_hygiene.hygiene_report(merged)
+    print(f"[web] website kinds {rep['website_kind']}, propagated {rep['website_propagated']}")
 
     written = export.write_merged(merged, data_root, scope)
     summary = export.write_summary(merged, data_root, scope, pbf_meta, runtimes)
     for p in [*written, summary]:
+        print(f"[out] {p}")
+    return 0
+
+
+def run_web_hygiene(scope: str, data_dir=None, propagate: bool = True) -> int:
+    """Item 6 stage 0d on an existing merged table: rewrite 4326 + 3857 + summary."""
+    data_root = paths.data_root(data_dir)
+    scope = _scope_name(_resolve_states(scope)) if scope != "DE" else "DE"
+    src = paths.merged_parquet(data_root, scope, "4326")
+    if not src.exists():
+        raise SystemExit(f"{src} missing — run `geoextract extract` first")
+    t0 = time.time()
+    gdf = gpd.read_parquet(src)
+    before = int(gdf["website"].notna().sum())
+    gdf = web_hygiene.apply_hygiene(gdf, propagate=propagate)
+    gdf = resolve.compute_confidence(gdf)
+    rep = web_hygiene.hygiene_report(gdf)
+    print(f"[web] {scope}: website {before} → {rep['website_kept']} kept, "
+          f"{rep['website_listing']} moved to website_listing, "
+          f"{rep['website_propagated']} propagated; kinds {rep['website_kind']} "
+          f"({time.time() - t0:.0f} s)")
+    for host, n in rep["top_hosts"].items():
+        print(f"[web]   {host}: {n}")
+    for p in [*export.write_merged(gdf, data_root, scope),
+              export.write_summary(gdf, data_root, scope, None, {"web_hygiene": time.time() - t0})]:
         print(f"[out] {p}")
     return 0
 

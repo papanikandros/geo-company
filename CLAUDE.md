@@ -203,19 +203,48 @@ needs its own go with the volume stated first (golden rule 3).
          Breisgauer Bucht, Schwarzwaldmilch) — legitimate under the 2026-09-01 "no
          consolidation of same-operator Lokationen, resolution may link them" decision.
          Revisit only if Splink shows chaining errors.
-6. **B6 Handelsregister — BEFORE Part C, no longer optional.** Purpose: verify that the
-   entities in the merged table EXIST and cross-check them in every field a register
-   offers (name, legal form, seat address, HR number/court, status incl. dissolved).
-   - Preferred route: a **bulk register dump** matched locally (fast, no 60 req/h limit).
-     Before any download: probe the candidate dumps for freshness and size and report
-     both — `okfde/offeneregister.de` (OpenCorporates/OKFN dump; suspected stale, check
-     date first), plus any newer open bulk source found in a fresh research pass. The
-     `bundesAPI/handelsregister` CLI (≤ 60 req/h) is only for spot-checks / the residual.
-   - Match on normalized name + city/PLZ (item 5), record `hr_*` provenance and a
-     `register_match` status per row; a non-match is NOT proof of non-existence — most
-     small businesses (sole traders, amenities) are not HR-registered.
-   - Output feeds `confidence` and becomes the ground truth for Part C evaluation.
-7. **Part C NACE classification — refactored against the 2026-08-30 research** before
+6. **Register + website pipeline — merged items 6 + 7 (user decision 2026-09-07), BEFORE
+   sharing (item 7) and Part C.** Plan: `register-website-pipeline-plan.md` (authoritative
+   for this item). Stages: 0 register build from `data/raw/handelsregister/handelsregister.db`
+   (2.19 M HRB companies 2001 – 2022-08, downloaded 2026-09-07, CC-BY 4.0) + website hygiene
+   (`website_kind`, directories → `website_listing`) → 1 Impressum extraction on own websites
+   (legal name, form, HRB + court, VAT-ID; `website_verified`) → 2 register join (exact on
+   HRB number, else name-key + PLZ + street; `register_match`, `hr_status` incl. dissolved,
+   `hr_snapshot_date`, `hr_source`, `hr_objective`) → 3 URL discovery for named rows without
+   a site (cluster propagation → domain guessing + DNS → Common Crawl host list → self-hosted
+   SearXNG with the CBS/`SNStatComp/urlfinding` features, classifier retrained on Bremen) →
+   4 two-way diff map ↔ register (register addresses geocoded OFFLINE against local OSM
+   `addr:*`; `register_only_industrial` gap layer) → 5 outputs, eval, spec amendments.
+   Facts behind it: DE table 63.4 % with `website` but only 30.8 % of 366 592 industrial rows;
+   104 903 gelbeseiten listings; 689 247 unnamed rows; HRA-style names (GmbH & Co. KG, KG,
+   e.K.) = 40 k industrial rows → the 2019 dump (260 MB) is needed for HRA/GnR/PR/VR, GLEIF
+   (479 MB, CC0, 255 k DE) for fresh large-firm data; both downloads need a go. Research:
+   `research/website-discovery/report.md` (F1 ceiling ≈ 0.82; municipality not PLZ in
+   queries; Impressum = exact linkage; Kriesch 2024 Common-Crawl route). Network-heavy stages
+   run on an unmetered machine. Bremen first at every stage; nothing starts without a go.
+7. **Share the data state with colleagues (user idea 2026-09-07) — so they can run the NACE
+   classification themselves.** Proposal (Claude's take, awaiting decision):
+   - **Ship GeoParquet, not a Postgres dump.** The merged table is already the exchange
+     format (spec §1, EPSG:4326, ~690 MB for 4.14 M rows). Anyone reads it in seconds with
+     pandas/geopandas/DuckDB, no server. A Postgres/PostGIS dump would be several GB of
+     text, needs a server install per colleague and buys nothing for classification work;
+     keep it as an option only if someone needs concurrent multi-user writes.
+   - **SQL for those who want it: one DuckDB file** (`geoextract db build` → single
+     `.duckdb` with the spatial extension, ~1 GB, portable) or plain
+     `SELECT … FROM 'companies_merged_DE_4326.parquet'` in DuckDB — zero setup.
+   - **Distribution outside git**: `data/` stays gitignored (GitHub caps files at 100 MB).
+     Publish the parquet + summary JSON + a checksum manifest as a **GitHub Release asset**
+     (2 GB/file, free) or on the shared drive; add `scripts/fetch_data.py` (or `geoextract
+     data pull`) that downloads and verifies them. Upload volume ≈ 0.7 GB from the metered
+     connection — needs a go.
+   - **Contribution path back**: colleagues do NOT regenerate the table; they deliver a
+     small labels file (`nace_labels_<who>.parquet`: id, nace_codes, nace_primary,
+     nace_confidence, nace_method, nace_reasoning) that C6 writeback ingests. Define that
+     file contract first (it is the §3 nace_* columns keyed by `id`).
+   - README quickstart (install, pull data, open in DuckDB/QGIS, label file format) and
+     the licence block (ODbL derivative database — attribution required; CDLA/DL-DE notes
+     from `config.ATTRIBUTION`).
+8. **Part C NACE classification — refactored against the 2026-08-30 research** before
    any classify code is written: read INSEE GRAAL / codif-ape-train (adapt vs
    reimplement), Kühnemann 2020 + Beuter 2025; crawl4ai + ARGUS practices for fetching;
    tags/register hints as a first-class evidence path (54 % of firms have no findable
@@ -226,9 +255,9 @@ needs its own go with the volume stated first (golden rule 3).
      2026-09-03; the spec's "NACE Rev. 2 / WZ 2008" wording is superseded — amend spec §0/§3
      descriptions additively, no column renames). Older sources map forward via the
      Destatis 2008 → 2025 Umsteigeschlüssel (xlsx, ~176 KB, download needs go).
-8. **E1** tests / README / CI; then validation layers (sEEnergies/Hotmaps, Overture
+9. **E1** tests / README / CI; then validation layers (sEEnergies/Hotmaps, Overture
    overlap stats, density QA) as time allows.
-9. **Later: deployment of the merged table to Cloudflare KV** (user idea 2026-09-04) — serve
+10. **Later: deployment of the merged table to Cloudflare KV** (user idea 2026-09-04) — serve
    the company data from an edge key-value store so the map/API reads are ultra fast.
    Think through first: key design (per company id vs. per grid cell / district tiles),
    the 25 MB per-value limit (the DE table is ~700 MB → must be sharded), update flow after

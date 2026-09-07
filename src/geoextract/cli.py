@@ -40,6 +40,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("--scope", default="bremen")
     _add_common(p_export)
 
+    p_reg = sub.add_parser("register", help="register + website pipeline (item 6): register side")
+    reg_sub = p_reg.add_subparsers(dest="register_cmd", required=True)
+    p_reg_build = reg_sub.add_parser("build", help="bulk register files → hr_companies/hr_names parquet")
+    p_reg_build.add_argument("--sources", default="hr2022,hr2019,gleif",
+                             help="comma-separated: hr2022 (handelsregister.db), hr2019 (OKFN dump), gleif")
+    p_reg_build.add_argument("--force", action="store_true", help="rebuild existing parquet files")
+    _add_common(p_reg_build)
+
+    p_web = sub.add_parser("web", help="register + website pipeline (item 6): website side")
+    web_sub = p_web.add_subparsers(dest="web_cmd", required=True)
+    p_web_hyg = web_sub.add_parser("hygiene", help="normalise URLs, split own sites from listings")
+    p_web_hyg.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
+    p_web_hyg.add_argument("--no-propagate", action="store_true",
+                           help="do not copy URLs between rows with equal name key + postcode")
+    _add_common(p_web_hyg)
+
     p_run = sub.add_parser("run", help="chain extract → classify → export")
     p_run.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
     p_run.add_argument("--sources", default="osm,ied,abwaerme,overture,mastr")
@@ -61,6 +77,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         from .pipeline import run_all
         return run_all(scope=args.scope, sources=args.sources, data_dir=args.data_dir)
+    if args.command == "register" and args.register_cmd == "build":
+        from . import paths as _paths
+        from .register import build as register_build
+        written = register_build.build(_paths.data_root(args.data_dir),
+                                       [x.strip() for x in args.sources.split(",") if x.strip()],
+                                       force=args.force)
+        for p in written:
+            print(f"[out] {p}")
+        return 0 if written else 1
+    if args.command == "web" and args.web_cmd == "hygiene":
+        from .pipeline import run_web_hygiene
+        return run_web_hygiene(scope=args.scope, data_dir=args.data_dir,
+                               propagate=not args.no_propagate)
     if args.command == "classify":
         print("geoextract classify is Part C — not implemented yet (see GEOEXTRACT_SPEC.md).",
               file=sys.stderr)
