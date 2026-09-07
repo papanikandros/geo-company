@@ -105,7 +105,7 @@ _UNIT_BASE_COLS = [
     "EinheitMastrNummer", "AnlagenbetreiberMastrNummer", "LokationMastrNummer",
     "EinheitBetriebsstatus", "Bruttoleistung", "Laengengrad", "Breitengrad",
     "Strasse", "Hausnummer", "Postleitzahl", "Ort", "Bundesland", "Landkreis",
-    "Gemeindeschluessel", "Inbetriebnahmedatum",
+    "Gemeindeschluessel", "Inbetriebnahmedatum", "SpeMastrNummer",
 ]
 
 
@@ -227,6 +227,8 @@ def _read_units(con: sqlite3.Connection, table: str, spec: dict) -> pd.DataFrame
     if name_col:
         cols.append(name_col)
     df = pd.read_sql(f'SELECT {", ".join(f"`{c}`" for c in cols)} FROM {table}', con)
+    if table == "storage_extended":
+        df = _fill_storage_capacity(con, df)
     df["_site_name"] = df[name_col].astype("string") if name_col else pd.NA
     # the kW floor applies to Bruttoleistung only (consumer tables have no floor)
     df["_kw"] = pd.to_numeric(df.get("Bruttoleistung"), errors="coerce")
@@ -251,6 +253,32 @@ def _read_units(con: sqlite3.Connection, table: str, spec: dict) -> pd.DataFrame
     if "min_kw" in spec:
         df = df[df["_kw"] >= spec["min_kw"]]
     return df.reset_index(drop=True)
+
+
+def _fill_storage_capacity(con: sqlite3.Connection, df: pd.DataFrame) -> pd.DataFrame:
+    """The usable storage capacity (kWh) lives on the PLANT (AnlagenStromSpeicher, open-mastr
+    table ``storage_units``, parsed 2026-09-07), not on the unit: fill the unit column
+    ``NutzbareSpeicherkapazitaet`` from the plant it belongs to (``SpeMastrNummer``) where
+    the unit's own value is empty. Verbatim, no arithmetic."""
+    if "SpeMastrNummer" not in df.columns or "storage_units" not in {
+            r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
+        return df
+    plant_cols = set(_table_cols(con, "storage_units"))
+    if not {"MastrNummer", "NutzbareSpeicherkapazitaet"} <= plant_cols:
+        return df
+    plants = pd.read_sql("SELECT MastrNummer, NutzbareSpeicherkapazitaet FROM storage_units "
+                         "WHERE NutzbareSpeicherkapazitaet IS NOT NULL", con)
+    if not len(plants):
+        return df
+    cap = pd.to_numeric(plants.set_index("MastrNummer")["NutzbareSpeicherkapazitaet"],
+                        errors="coerce")
+    cap = cap[~cap.index.duplicated(keep="first")]
+    own = pd.to_numeric(df.get("NutzbareSpeicherkapazitaet"), errors="coerce")
+    from_plant = df["SpeMastrNummer"].map(cap)
+    df["NutzbareSpeicherkapazitaet"] = own.where(own.notna(), from_plant)
+    print(f"[mastr] storage capacity (kWh) from plant table: "
+          f"{int(from_plant.notna().sum())} of {len(df)} storage units")
+    return df
 
 
 def _read_operators(con: sqlite3.Connection) -> pd.DataFrame:

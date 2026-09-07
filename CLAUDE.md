@@ -114,11 +114,14 @@ business emails only (GDPR).
 - **B5 MaStR:** data present since 2026-08-31 (`data/raw/mastr/mastr.db`, 11 GB, zip + .bak
   kept); kW floors ≥ 50 kW (PV/storage ≥ 100 kW); B5.1 (2026-09-04): per-unit
   `mastr_tech_detail`, no kW sums; `business_subtype` NULL; WZ 2025 in `mastr_wz_*` +
-  `mastr_wz_code` (Destatis file `data/raw/wz2025/`). Known gap: storage kWh empty in the
-  20260827 parse (`storage_units` table has 0 rows → local re-parse of AnlagenStromSpeicher).
+  `mastr_wz_code` (Destatis file `data/raw/wz2025/`). Storage kWh: the plant-level table
+  (AnlagenStromSpeicher → open-mastr `storage_units`) was re-parsed 2026-09-07 from the kept
+  zip (`data/raw/mastr/reparse_storage_units.py`, date-pinned, no download); the adapter
+  fills `NutzbareSpeicherkapazitaet` from the plant via `SpeMastrNummer` (2 964 of 2 964
+  units ≥ 100 kW). Zip backup: `data/raw/mastr/Gesamtdatenexport_20260827.zip.bak`.
 - **Resolve engine vectorised 2026-09-04:** DE merge 44.6 h → ~2.5 min end to end, output
-  identical (see queue item 2). Reference copies of the previous DE merge:
-  `companies_merged_DE_pre_b51_*` (delete when no longer needed).
+  identical (see queue item 2). Reference copies of earlier merges were deleted 2026-09-07;
+  validate matcher changes by keeping a copy of the current merge before the change.
 - Git: user makes every commit; Claude stages code + CLAUDE.md only (never spec/plan .md).
   Untracked-by-decision: old consumer scripts (`scripts/build_*`, `app_bokeh_companies.py`),
   plan .md files, `.commit-messages/`, `.playwright-mcp/`.

@@ -199,6 +199,31 @@ def test_status_filter_raises_loudly_on_unknown_values(tmp_path):
         mastr.extract_mastr(root, force=True)
 
 
+def test_storage_capacity_filled_from_plant_table(tmp_path):
+    root = _mk_db(tmp_path)
+    con = sqlite3.connect(root / config.MASTR_DB)
+    storage = pd.DataFrame({
+        "EinheitMastrNummer": ["SSE1", "SSE2"], "AnlagenbetreiberMastrNummer": ["ABR1", "ABR1"],
+        "LokationMastrNummer": ["SEL9", "SEL9"], "EinheitBetriebsstatus": ["In Betrieb"] * 2,
+        "Bruttoleistung": [500.0, 300.0], "Nettonennleistung": [480.0, 290.0],
+        "NutzbareSpeicherkapazitaet": [None, 900.0],     # SSE1 empty → from the plant
+        "SpeMastrNummer": ["SPE1", "SPE2"],
+        "Laengengrad": [8.85, 8.85], "Breitengrad": [53.15, 53.15],
+        "Strasse": [None] * 2, "Hausnummer": [None] * 2, "Postleitzahl": ["28199"] * 2,
+        "Ort": ["Bremen"] * 2, "Bundesland": ["Bremen"] * 2, "Landkreis": [None] * 2,
+        "Gemeindeschluessel": ["04011000"] * 2, "Inbetriebnahmedatum": ["2023-01-01"] * 2,
+        "NameStromerzeugungseinheit": ["Speicher A", "Speicher B"],
+    })
+    storage.to_sql("storage_extended", con, index=False)
+    pd.DataFrame({"MastrNummer": ["SPE1", "SPE2"],
+                  "NutzbareSpeicherkapazitaet": [1200.0, 999.0]}).to_sql("storage_units", con, index=False)
+    con.commit(); con.close()
+    gdf = mastr.extract_mastr(root, force=True)
+    detail = json.loads(gdf[gdf.id == "mastr_ABR1_SEL9"].iloc[0].mastr_tech_detail)
+    caps = {u["unit"]: u.get("NutzbareSpeicherkapazitaet") for u in detail["storage"]}
+    assert caps == {"SSE1": 1200.0, "SSE2": 900.0}   # own value wins, plant fills the gap
+
+
 def test_wz_label_norm():
     n = mastr._norm_wz_label
     assert n("Säge- und Hobelwerke; Bearbeitung") == n("Säge – und  Hobelwerke, Bearbeitung")
