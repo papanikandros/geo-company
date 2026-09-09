@@ -1,0 +1,84 @@
+/* Mirrors the canonical preview (scripts/preview_layer.py PAGE_TMPL): full-screen map, tool
+   box top-left, floating dataset toolbar bottom-centre, 340 px companies panel on the right. */
+html, body {margin: 0; height: 100%; font: 12px sans-serif; color: #222; overflow: hidden}
+#map {position: absolute; top: 0; bottom: 0; left: 0; right: 340px}
+.maplibregl-canvas-container {cursor: default}
+
+#pv-tools {position: fixed; top: 16px; left: 60px; z-index: 1000; background: #fff; padding: 4px;
+  border: 1px solid #ccc; border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,.3); font: 12px sans-serif}
+#pv-tools button {font: 12px sans-serif; padding: 4px 10px; margin: 0 2px; cursor: pointer;
+  border: 1px solid #ccc; border-radius: 3px; background: #f5f5f5}
+#pv-tools button.active {background: #d0e2f4; border-color: #7aa8d8}
+
+#pv-filters {position: fixed; top: 16px; left: 520px; z-index: 1000; background: #fff; padding: 4px;
+  border: 1px solid #ccc; border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,.3); font: 12px sans-serif;
+  display: flex; align-items: center; gap: 4px}
+#pv-filters select, #pv-filters button {font: 12px sans-serif; padding: 3px 6px; border: 1px solid #ccc;
+  border-radius: 3px; background: #f5f5f5; cursor: pointer}
+#pv-filters .chk {display: flex; align-items: center; gap: 3px; color: #444; margin: 0 4px}
+
+#pv-toolbar {position: fixed; bottom: 16px; left: calc(50% - 170px); transform: translateX(-50%);
+  z-index: 1000; background: #fff; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.3); font: 12px sans-serif; white-space: nowrap;
+  max-width: calc(95vw - 340px); overflow-x: auto}
+#pv-toolbar .pv-title {font-weight: bold; margin-right: 8px}
+#pv-toolbar-head {display: flex; align-items: center; gap: 6px}
+#pv-collapse {font: 12px sans-serif; padding: 1px 6px; cursor: pointer; border: 1px solid #ccc; border-radius: 3px; background: #f5f5f5}
+#pv-toolbar.collapsed #pv-toolbar-body {display: none}
+#pv-inview {position: absolute; top: 16px; right: 356px; z-index: 1000; background: rgba(255,255,255,.92); padding: 4px 8px;
+  border: 1px solid #ccc; border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,.3); font: 12px sans-serif; color: #333}
+.pv-row {display: flex; align-items: center; gap: 4px; margin-top: 4px; white-space: nowrap}
+.pv-ds {font-weight: bold; color: #555; font-size: 11px; min-width: 38px; margin-right: 4px}
+.pv-btn {font: 12px sans-serif; padding: 4px 10px; margin: 0; cursor: pointer;
+  border: 1px solid #ccc; border-radius: 3px; background: #f5f5f5; color: #aaa}
+.pv-btn.active {background: #e6e6e6; color: #000; box-shadow: inset 0 1px 2px rgba(0,0,0,.15)}
+.pv-row.pv-off .pv-btn:not(:first-of-type), .pv-row.pv-off .pv-ds {opacity: .45}
+.pv-sep {display: inline-block; width: 1px; height: 18px; background: #ddd; margin: 0 4px}
+.pv-btn:not(.active) .pv-swatch {opacity: .25}
+.pv-swatch {display: inline-block; width: 10px; height: 10px; margin-right: 5px; vertical-align: -1px; border-radius: 2px}
+.pv-n {color: #888; font-size: 10px; margin-left: 2px}
+
+#pv-panel {position: fixed; top: 0; right: 0; bottom: 0; width: 340px; z-index: 1000; background: #fff;
+  border-left: 1px solid #ccc; box-shadow: -1px 0 4px rgba(0,0,0,.2); font: 12px sans-serif;
+  display: flex; flex-direction: column}
+#pv-panel-head {padding: 8px 10px; border-bottom: 1px solid #ddd}
+#pv-panel-head b {font-size: 13px}
+#pv-count {color: #555; margin-left: 6px}
+#pv-download {float: right; font: bold 12px sans-serif; padding: 4px 12px; cursor: pointer;
+  border: 1px solid #3c763d; border-radius: 3px; background: #5cb85c; color: #fff}
+#pv-download:hover {background: #449d44}
+#pv-download:disabled {background: #b8d8b8; border-color: #a8c8a8; cursor: not-allowed}
+#pv-format {float: right; margin-right: 6px; font: 11px sans-serif; padding: 3px 4px; border: 1px solid #bbb; border-radius: 3px}
+#pv-table-wrap {flex: 1; overflow: auto}
+#pv-table {border-collapse: collapse; width: 100%}
+#pv-table th {position: sticky; top: 0; background: #f0f0f0; text-align: left; padding: 4px 6px;
+  border-bottom: 1px solid #ccc; font-size: 11px}
+#pv-table td {padding: 3px 6px; border-bottom: 1px solid #eee; font-size: 11px; max-width: 130px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap}
+#pv-table tr:hover {background: #eef4fb}
+#pv-table tr.pv-hit {cursor: pointer}
+#pv-note {padding: 6px 10px; color: #777; border-top: 1px solid #eee; font-size: 11px}
+#pv-search {display: block; width: 100%; box-sizing: border-box; margin-top: 6px; padding: 4px 6px;
+  font: 12px sans-serif; border: 1px solid #bbb; border-radius: 3px}
+.pv-link {color: #1a5fb4; text-decoration: underline}
+
+#selshape {position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5}
+
+.maplibregl-popup {max-width: 440px !important; z-index: 900}
+.maplibregl-popup-content {font: 12px sans-serif; padding: 8px 10px; max-height: 60vh; overflow: auto}
+.card b {color: #333}
+.card details {margin-top: 4px; border-top: 1px dashed #ddd; padding-top: 3px}
+.card summary {cursor: pointer; font-weight: bold; color: #555}
+.card .rec {margin: 2px 0 4px 8px; padding-left: 6px; border-left: 2px solid #eee}
+.card .k {color: #666}
+.card .units {margin-left: 14px; color: #444}
+.hover .maplibregl-popup-content {padding: 4px 8px; background: rgba(255,255,255,.96); pointer-events: none}
+
+#extracts {position: fixed; top: 60px; left: 60px; width: 560px; max-height: 70vh; overflow: auto; background: #fff;
+  border: 1px solid #bbb; border-radius: 4px; box-shadow: 0 4px 12px rgba(0,0,0,.2); z-index: 1100; padding: 8px 10px}
+#extracts .ex-head {display: flex; gap: 6px; align-items: baseline; margin-bottom: 6px}
+#extracts #ex-close {margin-left: auto; border: none; background: none; font-size: 16px; cursor: pointer}
+#extracts table {border-collapse: collapse; width: 100%; font-size: 11px}
+#extracts td, #extracts th {border-bottom: 1px solid #eee; padding: 2px 4px; text-align: left}
+#extracts a {color: #1a5fb4}
+.sub {color: #777; font-size: 11px}

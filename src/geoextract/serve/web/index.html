@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>geoextract – companies</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.0/dist/maplibre-gl.css">
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+<div id="map"></div>
+
+<!-- top-left tool box (mirrors the canonical preview: Box / Lasso / Clear / Reset / Image) -->
+<div id="pv-tools">
+  <button id="pv-box" title="drag a rectangle to select">▭ Box select</button>
+  <button id="pv-lasso" title="draw a free shape to select">✎ Lasso select</button>
+  <button id="pv-clear" title="clear the selection (Esc)">✕ Clear</button>
+  <button id="pv-reset" title="reset the view">⟲ Reset</button>
+  <button id="pv-save" title="save the current map view as PNG">📷 Image</button>
+</div>
+
+<!-- served-map additions (serve-plan.md): region / sector filters + precomputed downloads -->
+<div id="pv-filters">
+  <select id="sel-state" title="state"><option value="">all states</option></select>
+  <select id="sel-district" title="district (Kreis)"><option value="">all districts</option></select>
+  <select id="sel-sector" title="sector"><option value="">all sectors</option></select>
+  <label class="chk" title="only companies with the intrinsic industrial signal"><input type="checkbox" id="chk-ind"> industrial</label>
+  <button id="btn-extracts" title="precomputed downloads (parquet)">⇩ Downloads</button>
+</div>
+
+<!-- floating bottom toolbar: one row of toggles per dataset -->
+<div id="pv-toolbar">
+  <div id="pv-toolbar-head"><button id="pv-collapse" title="collapse / expand the data layers">▾</button><span class="pv-title" id="pv-color-col"></span></div>
+  <div id="pv-toolbar-body"></div>
+</div>
+<div id="pv-inview" title="companies rendered in the current view"></div>
+
+<!-- right panel: selection / search table -->
+<div id="pv-panel">
+  <div id="pv-panel-head">
+    <button id="pv-download" disabled title="download the listed companies (selection or search hits) — all rows">Download</button>
+    <select id="pv-format" title="download format"><option value="csv">csv</option><option value="parquet">parquet</option><option value="parquet-full">parquet + sources</option></select>
+    <b>Companies</b><span id="pv-count"></span>
+    <input id="pv-search" type="search" placeholder="search company name … (visible companies; click a row to zoom)"
+           title="case-insensitive substring match on name among the currently visible companies; results replace the list">
+  </div>
+  <div id="pv-table-wrap"><table id="pv-table"></table></div>
+  <div id="pv-note"></div>
+</div>
+
+<div id="extracts" hidden>
+  <div class="ex-head"><b>Downloads</b> — precomputed parquet extracts per state × sector
+    (<i>flat</i> = one row per company, <i>full</i> = + raw record of every source)
+    <button id="ex-close">×</button></div>
+  <div id="ex-body"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.0/dist/maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pmtiles@4.3.0/dist/pmtiles.js"></script>
+<script src="static/app.js"></script>
+</body>
+</html>

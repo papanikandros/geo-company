@@ -64,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve_build.add_argument("--no-tiles", action="store_true", help="skip the PMTiles build")
     p_serve_build.add_argument("--force", action="store_true", help="rebuild an existing version")
     _add_common(p_serve_build)
+    p_serve_dev = serve_sub.add_parser("dev", help="local map + JSON endpoints for a serve build (stdlib)")
+    p_serve_dev.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
+    p_serve_dev.add_argument("--version", default=None, help="serve version dir (default: latest)")
+    p_serve_dev.add_argument("--port", type=int, default=8765)
+    _add_common(p_serve_dev)
 
     p_run = sub.add_parser("run", help="chain extract → classify → export")
     p_run.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
@@ -107,6 +112,11 @@ def main(argv: list[str] | None = None) -> int:
                                 tiles=not args.no_tiles, force=args.force)
         print(f"[out] {out}")
         return 0
+    if args.command == "serve" and args.serve_cmd == "dev":
+        from . import config as _config, paths as _paths
+        from .serve import dev as serve_dev
+        scope = _config.scope_name(args.scope)
+        return serve_dev.main(_paths.data_root(args.data_dir), scope, args.version, args.port)
     if args.command == "classify":
         print("geoextract classify is Part C — not implemented yet (see GEOEXTRACT_SPEC.md).",
               file=sys.stderr)
