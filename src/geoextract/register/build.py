@@ -286,7 +286,8 @@ def build_hr2019(data_root: Path, force: bool = False) -> Path:
     df["city"] = [p[3] for p in parsed]
     df["city"] = df["city"].where(df["city"].notna(), df["registered_office"])
     df["status"] = df["status_raw"].map(
-        lambda s: "active" if s == "currently registered" else ("dissolved" if s == "removed" else "unknown"))
+        lambda s: "active" if s == "currently registered" else ("dissolved" if s == "removed" else "unknown"),
+        na_action="ignore").fillna("unknown")
     df["dissolved"] = pd.NA
     companies_out = _finish(df, "hr2019", config.HR2019_SNAPSHOT)
     prev = df[["hr_id", "previous_names"]].dropna()
@@ -363,7 +364,8 @@ def build_gleif(data_root: Path, force: bool = False) -> Path:
     df["register_number"] = [p[1] for p in parsed]
     df["court"] = pd.NA
     df["status"] = df["entity_status"].map(
-        lambda s: "active" if s == "ACTIVE" else ("dissolved" if s == "INACTIVE" else "unknown"))
+        lambda s: "active" if s == "ACTIVE" else ("dissolved" if s == "INACTIVE" else "unknown"),
+        na_action="ignore").fillna("unknown")
     df["state"] = pd.NA
     df["dissolved"] = pd.NA
     df["previous_names"] = pd.NA
