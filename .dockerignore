@@ -1,0 +1,10 @@
+data/
+output/
+research/
+.venv/
+.git/
+.playwright-mcp/
+.commit-messages/
+**/__pycache__/
+*.png
+*.html

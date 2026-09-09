@@ -1,0 +1,13 @@
+# Runtime dependencies of the served map + API only (Dockerfile). The full pipeline
+# (quackosm, splink, open-mastr …) is NOT needed to serve; keep this list in step with
+# what geoextract.serve / geoextract.resolve / geoextract.schema import.
+duckdb>=1.5
+pandas>=2.2
+numpy>=2
+pyarrow>=16
+shapely>=2.1
+geopandas>=1.1
+pyproj>=3.6
+rapidfuzz>=3.0
+fastapi>=0.115
+uvicorn[standard]>=0.30

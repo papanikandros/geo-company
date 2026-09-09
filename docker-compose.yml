@@ -1,0 +1,56 @@
+# geoextract served map + API (serve-plan.md S4). One file for every target:
+#   laptop:            docker compose up -d            → http://localhost/
+#   VPS / institute:   SITE_ADDRESS=companies.example.org docker compose up -d   (Caddy gets TLS)
+#
+# Layout on the host:  ./data/serve/<SCOPE>/<version>/  (built by the builder profile or by
+# `geoextract serve build`), with ./data/serve/<SCOPE>/current → the version to serve.
+# Caddy serves /data/* straight from that directory (tiles need HTTP Range; Caddy does it,
+# with gzip/zstd and long cache headers); everything else is proxied to the API.
+
+x-common: &common
+  build:
+    context: .
+    target: ${IMAGE_TARGET:-runtime}   # "full" adds tippecanoe for the builder profile
+  image: geoextract:${IMAGE_TARGET:-runtime}
+  environment:
+    GEOEXTRACT_DATA_DIR: /data
+  volumes:
+    - ./data:/data
+
+services:
+  api:
+    <<: *common
+    command: ["serve", "api", "--scope", "${SCOPE:-DE}", "--host", "0.0.0.0", "--port", "8791"]
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp            # csv / parquet exports are written here before streaming
+    expose:
+      - "8791"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+      SCOPE: ${SCOPE:-DE}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/serve:/srv/serve:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # one-shot: merged parquet → serve version (tiles, extracts, manifest) + `current` switch
+  builder:
+    <<: *common
+    profiles: ["build"]
+    command: ["serve", "build", "--scope", "${SCOPE:-DE}", "--force"]
+
+volumes:
+  caddy_data:
+  caddy_config:

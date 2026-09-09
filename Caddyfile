@@ -1,0 +1,30 @@
+# geoextract — Caddy in front of the API (docker-compose.yml).
+# SITE_ADDRESS=":80" for a laptop / plain HTTP; a hostname for automatic HTTPS on the VPS.
+{$SITE_ADDRESS}
+
+encode zstd gzip
+
+# static data of the served version: PMTiles (Range requests), extracts, manifest, ui.json.
+# Immutable per version directory → long cache; Cloudflare in front caches it at the edge.
+handle_path /data/* {
+	root * /srv/serve/{$SCOPE}/current
+	header Cache-Control "public, max-age=86400"
+	header Access-Control-Allow-Origin "*"
+	file_server
+}
+
+# page, scripts, API, docs
+handle {
+	reverse_proxy api:8791
+}
+
+header {
+	-Server
+	X-Content-Type-Options nosniff
+	Referrer-Policy strict-origin-when-cross-origin
+}
+
+log {
+	output stdout
+	format console
+}
