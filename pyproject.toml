@@ -34,6 +34,11 @@ classify = [
 ai = ["sentence-transformers>=3.0", "faiss-cpu>=1.8"]
 crawl = ["crawl4ai>=0.4"]
 mastr = ["open-mastr>=0.14"]
+serve = [
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "uvicorn[standard]>=0.30",
+]
 
 [dependency-groups]
 dev = ["pytest>=8.0", "ruff>=0.5"]

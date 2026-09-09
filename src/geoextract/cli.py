@@ -69,6 +69,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve_dev.add_argument("--version", default=None, help="serve version dir (default: latest)")
     p_serve_dev.add_argument("--port", type=int, default=8765)
     _add_common(p_serve_dev)
+    p_serve_api = serve_sub.add_parser("api", help="FastAPI + DuckDB API + map page (extra: serve)")
+    p_serve_api.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
+    p_serve_api.add_argument("--version", default=None, help="serve version dir (default: latest)")
+    p_serve_api.add_argument("--port", type=int, default=8791)
+    p_serve_api.add_argument("--host", default="127.0.0.1")
+    _add_common(p_serve_api)
 
     p_run = sub.add_parser("run", help="chain extract → classify → export")
     p_run.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
@@ -117,6 +123,11 @@ def main(argv: list[str] | None = None) -> int:
         from .serve import dev as serve_dev
         scope = _config.scope_name(args.scope)
         return serve_dev.main(_paths.data_root(args.data_dir), scope, args.version, args.port)
+    if args.command == "serve" and args.serve_cmd == "api":
+        from . import config as _config, paths as _paths
+        from .serve import api as serve_api
+        scope = _config.scope_name(args.scope)
+        return serve_api.main(_paths.data_root(args.data_dir), scope, args.version, args.port, args.host)
     if args.command == "classify":
         print("geoextract classify is Part C — not implemented yet (see GEOEXTRACT_SPEC.md).",
               file=sys.stderr)
