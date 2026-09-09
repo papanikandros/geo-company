@@ -68,6 +68,14 @@ def register_parquet(root: Path, name: str) -> Path:
     return register_dir(root) / f"{name}.parquet"
 
 
+def serve_dir(root: Path, scope: str, version: str) -> Path:
+    """Serve build output (item 7): data/serve/{scope}/{version}/ (flat/full parquet, extracts,
+    tiles, search index, manifest)."""
+    d = root / "serve" / scope / version
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def classify_dir(root: Path) -> Path:
     d = root / "geoextract" / "classify"
     d.mkdir(parents=True, exist_ok=True)

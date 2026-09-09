@@ -17,16 +17,8 @@ from .sources import overture as overture_source
 from .web import hygiene as web_hygiene
 
 
-def _resolve_states(states: str) -> list[str]:
-    if states.strip().lower() == "all":
-        return list(config.STATES)
-    return [config.resolve_state(s) for s in states.split(",") if s.strip()]
-
-
-def _scope_name(slugs: list[str]) -> str:
-    if set(slugs) == set(config.STATES):
-        return "DE"
-    return slugs[0] if len(slugs) == 1 else "-".join(sorted(slugs))
+_resolve_states = config.resolve_states
+_scope_name = config.scope_name
 
 
 def extract_osm_state(slug: str, data_root, skip_download: bool = False) -> gpd.GeoDataFrame:

@@ -76,6 +76,24 @@ def resolve_state(value: str) -> str:
     return slug
 
 
+def resolve_states(states: str) -> list[str]:
+    """"bremen,hamburg" / "all" → Geofabrik slugs."""
+    if states.strip().lower() == "all":
+        return list(STATES)
+    return [resolve_state(s) for s in states.split(",") if s.strip()]
+
+
+def scope_name(states: str | list[str]) -> str:
+    """Scope label used in file names: "DE" for all states, one slug, or sorted slugs joined."""
+    if isinstance(states, str):
+        if states.strip() == "DE":
+            return "DE"
+        states = resolve_states(states)
+    if set(states) == set(STATES):
+        return "DE"
+    return states[0] if len(states) == 1 else "-".join(sorted(states))
+
+
 def geofabrik_url(slug: str) -> str:
     return f"{GEOFABRIK_BASE}/{slug}-latest.osm.pbf"
 
@@ -461,6 +479,26 @@ WEBSITE_DIRECTORY_MIN_ROWS = 100
 WEBSITE_DIRECTORY_NAME_RATIO = 0.9      # distinct names / rows
 WEBSITE_DIRECTORY_MAX_BRAND_SHARE = 0.3  # share of name keys containing the brand label
 WEBSITE_TRACKING_PARAMS = ("utm_", "fbclid", "gclid", "mc_cid", "mc_eid", "ref")
+
+# --- Serve build (queue item 7, serve-plan.md S1) -------------------------------------------
+SERVE_PUBLIC_DROP = {"email", "geometry"}          # never in a public download
+SERVE_EXTRA_PUBLIC = ["website_kind", "website_host", "website_listing", "website_source",
+                      "member_ids"]                 # debug columns that ARE public (tier 1)
+# columns of a raw source record that are merge bookkeeping, not the source's own data
+SERVE_RAW_DROP = {"email", "geometry", "source", "source_count", "confidence_score",
+                  "merged_at", "nace_codes", "nace_primary", "nace_section", "nace_confidence",
+                  "nace_method", "nace_reasoning", "wz_code", "is_industrial", "dedup_anchor"}
+SERVE_SOURCE_PREFIXES = {"osm": "osm_", "ied": "ied_", "abwaerme": "abw_", "mastr": "mastr_",
+                         "overture": "ovt_"}         # member id prefix → source key
+SERVE_SECTOR_COLUMN = "business_type"               # until Part C: nace_section
+SERVE_ROW_GROUP = 100_000
+SERVE_TILE_MINZOOM = 4
+SERVE_TILE_MAXZOOM = 14
+SERVE_TILE_ALLPOINTS_ZOOM = 11                      # from here every point is kept
+SERVE_TILE_SITES_MINZOOM = 12
+SERVE_TILE_LANDUSE_MINZOOM = 10
+SERVE_TILE_POINT_PROPS = ["id", "name", "business_type", "source", "source_count",
+                          "is_industrial", "nace_section", "state", "district_ags", "website"]
 
 # --- Confidence score weights (spec §5.4) -----------------------------------------------
 CONFIDENCE_WEIGHTS = {

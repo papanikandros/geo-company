@@ -56,6 +56,15 @@ def build_parser() -> argparse.ArgumentParser:
                            help="do not copy URLs between rows with equal name key + postcode")
     _add_common(p_web_hyg)
 
+    p_serve = sub.add_parser("serve", help="serve the merged table (item 7): build / api / push")
+    serve_sub = p_serve.add_subparsers(dest="serve_cmd", required=True)
+    p_serve_build = serve_sub.add_parser("build", help="merged table → flat/full parquet, extracts, tiles, manifest")
+    p_serve_build.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
+    p_serve_build.add_argument("--version", default=None, help="version label (default: merged_at)")
+    p_serve_build.add_argument("--no-tiles", action="store_true", help="skip the PMTiles build")
+    p_serve_build.add_argument("--force", action="store_true", help="rebuild an existing version")
+    _add_common(p_serve_build)
+
     p_run = sub.add_parser("run", help="chain extract → classify → export")
     p_run.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
     p_run.add_argument("--sources", default="osm,ied,abwaerme,overture,mastr")
@@ -90,6 +99,14 @@ def main(argv: list[str] | None = None) -> int:
         from .pipeline import run_web_hygiene
         return run_web_hygiene(scope=args.scope, data_dir=args.data_dir,
                                propagate=not args.no_propagate)
+    if args.command == "serve" and args.serve_cmd == "build":
+        from . import config as _config, paths as _paths
+        from .serve import build as serve_build
+        scope = _config.scope_name(args.scope)
+        out = serve_build.build(_paths.data_root(args.data_dir), scope, version=args.version,
+                                tiles=not args.no_tiles, force=args.force)
+        print(f"[out] {out}")
+        return 0
     if args.command == "classify":
         print("geoextract classify is Part C — not implemented yet (see GEOEXTRACT_SPEC.md).",
               file=sys.stderr)
