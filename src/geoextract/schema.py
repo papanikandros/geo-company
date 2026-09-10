@@ -50,6 +50,15 @@ COMPANY_COLUMNS: dict[str, tuple[str, bool, str]] = {
     "nace_reasoning": ("string", True, "short evidence string (≤ 300 chars)"),
     "wz_code": ("string", True, "German WZ 2008 code as supplied by a register, untouched"),
     "is_industrial": ("boolean", False, "nace_section ∈ {B,C,D,E,F} or intrinsic industrial signal"),
+    # --- §3.4 register verification (item 6 stage 2; additive, 2026-09-09) ---
+    "register_match": ("string", True, "exact_hrb | name_plz_street | name_plz | name_city | ambiguous | none | n/a (unnamed)"),
+    "hr_id": ("string", True, "register company id in hr_source (court code + number, OpenCorporates id, or LEI)"),
+    "hr_source": ("string", True, "hr2022 (offeneregister.de 2022) | hr2019 (OpenCorporates 2019) | gleif"),
+    "hr_status": ("string", True, "active | dissolved | unknown — at hr_snapshot_date"),
+    "hr_dissolved_date": ("string", True, "ISO date of the register deletion, if dissolved"),
+    "hr_snapshot_date": ("string", True, "date the register source is current to — a match is evidence as of this date"),
+    "hr_objective": ("string", True, "Unternehmensgegenstand (registered business purpose) — Part C evidence"),
+    "hr_capital": ("Float64", True, "registered capital (EUR) where the register has it"),
 }
 
 CONTRACT_ORDER = list(COMPANY_COLUMNS)

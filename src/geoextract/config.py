@@ -410,6 +410,13 @@ LEGAL_FORM_SUFFIXES = [
 
 SOURCE_PRIORITY = ["osm", "ied", "abwaerme", "mastr", "overture", "fsq", "handelsregister"]
 
+# Register join (item 6 stage 2, register/match.py): a shared name token decides an 80–89
+# pair only if it is rare among the register names of the scope (idf = ln(N / df)):
+# idf ≥ 11 ≈ fewer than ~20 of 1.1 M Bremen name variants carry it ("nacke", "korschek");
+# place names and trade words ("worpswede" ≈ 8, "rechtsanwaltsgesellschaft" ≈ 10) do not.
+REGISTER_IDF_RARE = 11.0
+REGISTER_IDF_COMMON = 9.0      # two shared tokens this rare also count
+
 # --- Register + website pipeline (queue item 6, register-website-pipeline-plan.md) ----------
 # Stage 0a–0c: bulk register files (never the 60 req/h portal). Paths relative to the data root.
 HR2022_DB = "raw/handelsregister/handelsregister.db"        # offeneregister.de, 2022-10-21, CC-BY 4.0

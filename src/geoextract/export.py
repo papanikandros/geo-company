@@ -60,6 +60,14 @@ def write_summary(
         "by_source": gdf["source"].value_counts(dropna=True).to_dict(),
         "multi_source_clusters": int((gdf["source_count"] >= 2).sum()),
         "is_industrial": int(gdf["is_industrial"].fillna(False).sum()),
+        "register": ({
+            "register_match": gdf["register_match"].value_counts(dropna=False).rename(index=str).to_dict(),
+            "hr_status": gdf["hr_status"].value_counts(dropna=True).to_dict(),
+            "hr_source": gdf["hr_source"].value_counts(dropna=True).to_dict(),
+            "industrial_matched": int((gdf["is_industrial"].fillna(False) & gdf["hr_id"].notna()).sum()),
+        } if "register_match" in gdf.columns else None),
+        "website_kind": (gdf["website_kind"].value_counts(dropna=False).rename(index=str).to_dict()
+                         if "website_kind" in gdf.columns else None),
         "field_coverage": {
             c: {"count": int(gdf[c].notna().sum()),
                 "share": round(float(gdf[c].notna().mean()), 3)}
