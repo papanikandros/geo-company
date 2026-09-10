@@ -51,6 +51,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_reg_match.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
     p_reg_match.add_argument("--sources", default="hr2022,gleif,hr2019", help="register sources to use")
     _add_common(p_reg_match)
+    p_reg_rec = reg_sub.add_parser("reconcile", help="register → map diff: register-only companies, geocoded offline")
+    p_reg_rec.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
+    _add_common(p_reg_rec)
 
     p_web = sub.add_parser("web", help="register + website pipeline (item 6): website side")
     web_sub = p_web.add_subparsers(dest="web_cmd", required=True)
@@ -96,6 +99,13 @@ def main(argv: list[str] | None = None) -> int:
         from .register import match as register_match
         register_match.run(_paths.data_root(args.data_dir), _config.scope_name(args.scope),
                            [x.strip() for x in args.sources.split(",") if x.strip()])
+        return 0
+    if args.command == "register" and args.register_cmd == "reconcile":
+        from . import config as _config
+        from . import paths as _paths
+        from .register import reconcile as register_reconcile
+        slugs = _config.resolve_states(args.scope if args.scope != "DE" else "all")
+        register_reconcile.reconcile(_paths.data_root(args.data_dir), _config.scope_name(args.scope), slugs)
         return 0
     if args.command == "web" and args.web_cmd == "hygiene":
         from .pipeline import run_web_hygiene

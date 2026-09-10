@@ -417,6 +417,25 @@ SOURCE_PRIORITY = ["osm", "ied", "abwaerme", "mastr", "overture", "fsq", "handel
 REGISTER_IDF_RARE = 11.0
 REGISTER_IDF_COMMON = 9.0      # two shared tokens this rare also count
 
+# Stage 4 (register/reconcile.py): interim industrial flag on the register's business purpose
+# (Unternehmensgegenstand) until Part C delivers WZ codes — substrings on the umlaut-folded
+# lower-case text; the exclude list catches trading / holding / real-estate uses of the words.
+REGISTER_INDUSTRIAL_KEYWORDS = (
+    "herstellung", "produktion", "fertigung", "verarbeitung", "erzeugung", "recycling",
+    "entsorgung", "abfall", "kraftwerk", "energieerzeugung", "stromerzeugung", "windpark",
+    "solarpark", "photovoltaik", "biogas", "raffinerie", "giesserei", "walzwerk", "schmiede",
+    "brauerei", "molkerei", "schlacht", "muehle", "saegewerk", "druckerei", "chemie",
+    "pharma", "metallbau", "maschinenbau", "anlagenbau", "schiffbau", "werft", "bergbau",
+    "steinbruch", "kies", "zement", "beton", "asphalt", "logistik", "spedition",
+    "lagerung", "hafen", "wasserversorgung", "abwasser", "fernwaerme",
+)
+REGISTER_INDUSTRIAL_EXCLUDE = (
+    "verwaltung von", "beteiligung", "vermietung", "immobilien", "grundstueck", "holding",
+    "handel mit", "grosshandel", "einzelhandel", "vertrieb von", "beratung", "vermittlung",
+    "softwareentwicklung", "software", "planung", "ingenieur", "architekt",
+)
+
+
 # --- Register + website pipeline (queue item 6, register-website-pipeline-plan.md) ----------
 # Stage 0a–0c: bulk register files (never the 60 req/h portal). Paths relative to the data root.
 HR2022_DB = "raw/handelsregister/handelsregister.db"        # offeneregister.de, 2022-10-21, CC-BY 4.0
