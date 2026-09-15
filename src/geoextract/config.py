@@ -512,6 +512,7 @@ WEBSITE_TRACKING_PARAMS = ("utm_", "fbclid", "gclid", "mc_cid", "mc_eid", "ref")
 # --- Serve build (queue item 7, serve-plan.md S1) -------------------------------------------
 SERVE_PUBLIC_DROP = {"email", "geometry"}          # never in a public download
 SERVE_EXTRA_PUBLIC = ["website_kind", "website_host", "website_listing", "website_source",
+                      "hr_name", "hr_matched_name", "register_score", "hr_candidates",
                       "member_ids"]                 # debug columns that ARE public (tier 1)
 # columns of a raw source record that are merge bookkeeping, not the source's own data
 SERVE_RAW_DROP = {"email", "geometry", "source", "source_count", "confidence_score",
@@ -527,7 +528,8 @@ SERVE_TILE_ALLPOINTS_ZOOM = 11                      # from here every point is k
 SERVE_TILE_SITES_MINZOOM = 12
 SERVE_TILE_LANDUSE_MINZOOM = 10
 SERVE_TILE_POINT_PROPS = ["id", "name", "business_type", "source", "source_count",
-                          "is_industrial", "nace_section", "state", "district_ags", "website"]
+                          "is_industrial", "nace_section", "state", "district_ags", "website",
+                          "register_match", "hr_status"]
 
 # --- Confidence score weights (spec §5.4) -----------------------------------------------
 CONFIDENCE_WEIGHTS = {

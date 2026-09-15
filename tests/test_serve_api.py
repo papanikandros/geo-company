@@ -39,7 +39,7 @@ def test_filters_and_formats(client):
     assert {x["id"] for x in r.json()} == {"osm_way/1"}
     # full tier json carries the nested sources
     r = client.get("/v1/companies", params={"state": "Bremen", "tier": "full"}).json()
-    rec = [x for x in r if x["id"] == "osm_way/1"][0]
+    rec = next(x for x in r if x["id"] == "osm_way/1")
     assert len(rec["mastr"]) == 2 and rec["abwaerme"][0]["abw_heat_mwh_a"] == 1234.0
     # geojson
     g = client.get("/v1/companies", params={"format": "geojson", "state": "Bremen"}).json()

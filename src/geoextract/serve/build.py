@@ -99,7 +99,7 @@ def tippecanoe_available() -> bool:
 TILE_SOURCE_COLS = ["id", "name", "business_type", "source", "source_count", "is_industrial",
                     "state", "district_ags", "website", "nace_section", "ied_activity",
                     "abw_heat_mwh_a", "mastr_techs", "grounds_area_source",
-                    "latitude", "longitude"]
+                    "register_match", "hr_status", "latitude", "longitude"]
 
 
 def _point_props(r: dict) -> dict:
@@ -133,7 +133,22 @@ def _point_props(r: dict) -> dict:
         p["mt"] = t
     if r.get("grounds_area_source") == "own_polygon":
         p["poly"] = 1
+    hr = register_class(r.get("register_match"), r.get("hr_status"))
+    if hr:
+        p["hr"] = hr
     return p
+
+
+def register_class(match: object, status: object) -> str | None:
+    """Register verdict class for the map's register row: matched_active | matched_dissolved |
+    ambiguous | none; None for unnamed rows (n/a) or tables without the join."""
+    if match is None or match is pd.NA or match in ("", "n/a"):
+        return None
+    if match == "ambiguous":
+        return "ambiguous"
+    if match == "none":
+        return "none"
+    return "matched_dissolved" if status == "dissolved" else "matched_active"
 
 
 def _iter_points(con: duckdb.DuckDBPyConnection, merged: Path):
@@ -153,7 +168,7 @@ def _iter_points(con: duckdb.DuckDBPyConnection, merged: Path):
             yield float(r["longitude"]), float(r["latitude"]), _point_props(r)
 
 
-PROPS_COLS = ["id", "name", "bt", "src", "sc", "ind", "st", "ags", "web", "nace", "ied", "abw", "mt", "poly"]
+PROPS_COLS = ["id", "name", "bt", "src", "sc", "ind", "st", "ags", "web", "nace", "ied", "abw", "mt", "poly", "hr"]
 
 
 def write_props(con: duckdb.DuckDBPyConnection, merged: Path, out: Path) -> int:
@@ -172,14 +187,34 @@ def write_props(con: duckdb.DuckDBPyConnection, merged: Path, out: Path) -> int:
     return len(df)
 
 
+def register_only_parquet(data_root: Path, scope: str) -> Path:
+    return data_root / "geoextract" / f"register_only_{scope}_4326.parquet"
+
+
 def _write_tile_features(con: duckdb.DuckDBPyConnection, merged: Path, sites: Path | None,
-                         landuse: list[Path], out: Path) -> dict[str, int]:
+                         landuse: list[Path], out: Path, register_only: Path | None = None) -> dict[str, int]:
     """GeoJSON text sequence (one feature per line) with per-feature tippecanoe layer/zoom.
     Points come from the MERGED table (internal debug columns feed the display groups);
     the tiles are a rendering product, not a download."""
-    counts = {"points": 0, "sites": 0, "landuse": 0}
+    counts = {"points": 0, "sites": 0, "landuse": 0, "register": 0}
     bt_of: dict[str, str] = {}
     with open(out, "w", encoding="utf8") as fh:
+        if register_only is not None and register_only.exists():   # stage 4 register-only companies
+            ro = gpd.read_parquet(register_only)
+            ro = ro[ro.geometry.notna() & (ro["status"] == "active")]
+            for _, r in ro.iterrows():
+                props = {"id": r["hr_id"], "name": r.get("name"), "src": r.get("hr_source"),
+                         "lf": r.get("legal_form"), "reg": r.get("hr_registration"),
+                         "geo": r.get("hr_geocode_method"), "ind": 1 if r.get("hr_industrial") else 0}
+                obj = r.get("objective")
+                if isinstance(obj, str) and obj:
+                    props["obj"] = obj[:240]
+                props = {k: v for k, v in props.items() if v is not None and v is not pd.NA}
+                feat = {"type": "Feature", "tippecanoe": {"layer": "register", "minzoom": config.SERVE_TILE_MINZOOM},
+                        "geometry": {"type": "Point", "coordinates": [float(r.geometry.x), float(r.geometry.y)]},
+                        "properties": props}
+                fh.write(json.dumps(feat, ensure_ascii=False, separators=(",", ":"), default=str) + "\n")
+                counts["register"] += 1
         for lon, lat, p in _iter_points(con, merged):
             if p.get("poly") and p.get("bt"):
                 bt_of[p["id"]] = p["bt"]
@@ -215,14 +250,15 @@ def _write_tile_features(con: duckdb.DuckDBPyConnection, merged: Path, sites: Pa
     return counts
 
 
-def build_ui_model(con: duckdb.DuckDBPyConnection, merged: Path, version: str) -> dict:
+def build_ui_model(con: duckdb.DuckDBPyConnection, merged: Path, version: str,
+                   data_root: Path | None = None, scope: str | None = None) -> dict:
     """ui.json — everything the map page needs to draw the toggle rows with counts and the
     state / district / sector selectors, without touching the parquet: dataset rows with
     match + group counts (same semantics as the canonical preview), states + districts with
     bounding boxes, the business-type palette."""
     have = set(_columns(con, merged))
     cols = [c for c in TILE_SOURCE_COLS if c in have and c != "name"] + (
-        ["district"] if "district" in have else [])
+        ["district"] if "district" in have else []) + (["hr_status"] if "hr_status" in have and "hr_status" not in TILE_SOURCE_COLS else [])
     df = con.execute(f"SELECT {', '.join(_q(c) for c in cols)} FROM read_parquet('{merged}')").fetchdf()
     for c in ("source", "business_type", "state", "district", "district_ags", "nace_section"):
         if c in df.columns:
@@ -269,6 +305,16 @@ def build_ui_model(con: duckdb.DuckDBPyConnection, merged: Path, version: str) -
             districts.append({"ags": str(ags), "name": str(name), "state": str(st), "n": len(g),
                               "bbox": [float(g["longitude"].quantile(0.005)), float(g["latitude"].quantile(0.005)),
                                        float(g["longitude"].quantile(0.995)), float(g["latitude"].quantile(0.995))]})
+    register = None
+    register_only = None
+    ro_path = register_only_parquet(data_root, scope) if data_root is not None else None
+    if ro_path is not None and ro_path.exists():
+        ro = pd.read_parquet(ro_path, columns=["status", "hr_industrial", "hr_geocode_method"])
+        ro = ro[(ro["status"] == "active") & (ro["hr_geocode_method"] != "none")]
+        register_only = {"industrial": int(ro["hr_industrial"].sum()), "other": int((~ro["hr_industrial"]).sum())}
+    if "register_match" in df.columns:
+        cls = pd.Series([register_class(m, st) for m, st in zip(df["register_match"], df["hr_status"])])
+        register = {str(k): int(v) for k, v in cls.dropna().value_counts().items()}
     sectors = sorted(cat[cat != "∅"].unique().tolist())
     palette = {c: groups.PALETTE[i % len(groups.PALETTE)] for i, c in enumerate(sorted(cat.unique()))}
     # scope bbox from the STATE bboxes (a few rows carry far-away coordinates — geocoded
@@ -281,7 +327,8 @@ def build_ui_model(con: duckdb.DuckDBPyConnection, merged: Path, version: str) -
                 float(df["longitude"].max()), float(df["latitude"].max())]
     return {"version": version, "companies": len(df), "bbox": bbox,
             "tile_minzoom": config.SERVE_TILE_MINZOOM, "tile_maxzoom": config.SERVE_TILE_MAXZOOM,
-            "datasets": ds, "labels": groups.DS_LABELS, "grp_order": groups.GRP_ORDER,
+            "datasets": ds, "register": register, "register_only": register_only,
+            "labels": groups.DS_LABELS, "grp_order": groups.GRP_ORDER,
             "palette": palette, "match_colours": groups.MATCH_COLOURS,
             "ied_labels": groups.IED_ACTIVITY_LABELS,
             "lu_colours": groups.LU_COLOURS, "unit_of": groups.UNIT_OF,
@@ -432,7 +479,8 @@ def build(data_root: Path, scope: str, version: str | None = None, tiles: bool =
             landuse = [paths.landuse_parquet(data_root, name_to_slug[st]) for st in states
                        if st in name_to_slug and paths.landuse_parquet(data_root, name_to_slug[st]).exists()]
             features = out / "features.geojsonl"
-            tile_counts = _write_tile_features(con, merged, sites, landuse, features)
+            tile_counts = _write_tile_features(con, merged, sites, landuse, features,
+                                               register_only_parquet(data_root, scope))
             build_tiles(features, pmtiles)
             features.unlink()
             print(f"[serve] tiles: {tile_counts} → {pmtiles.name} "
@@ -442,7 +490,7 @@ def build(data_root: Path, scope: str, version: str | None = None, tiles: bool =
                   "(install it and rerun with --force, or --no-tiles to silence)")
 
     # ui model -----------------------------------------------------------------------------
-    ui = build_ui_model(con, merged, version)
+    ui = build_ui_model(con, merged, version, data_root, scope)
     (out / "ui.json").write_text(json.dumps(ui, ensure_ascii=False), encoding="utf8")
     print(f"[serve] ui.json: datasets {list(ui['datasets'])}, {len(ui['states'])} states, "
           f"{len(ui['districts'])} districts")

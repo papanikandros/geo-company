@@ -114,7 +114,14 @@ class Store:
             parts.append("(" + " AND ".join(c) + ")")
         if not parts:
             return "FALSE", []
-        return "(" + " OR ".join(parts) + ")", params
+        expr = "(" + " OR ".join(parts) + ")"
+        hr = display.get("hr")           # register verdict classes (AND with the dataset rows)
+        if isinstance(hr, list):
+            if not hr:
+                return "FALSE", []
+            expr += " AND coalesce(hr, 'none') IN (" + ", ".join("?" * len(hr)) + ")"
+            params += list(hr)
+        return expr, params
 
     def where(self, state=None, district=None, sector=None, industrial=None, bbox=None,
               ids=None, display=None, q=None) -> tuple[str, list]:

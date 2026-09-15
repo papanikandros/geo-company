@@ -91,6 +91,12 @@
       Object.keys(DS[k].groups).forEach(function (g) { REG[k].grps[g] = true; });
     });
     var GPROP = {ied: "ied", abwaerme: "abw", overture: "bt", mastr: "mt"};
+    var HR_CLASSES = ["matched_active", "matched_dissolved", "ambiguous", "none"];
+    var HR_LABELS = {matched_active: "matched · active", matched_dissolved: "matched · dissolved", ambiguous: "ambiguous", none: "no match"};
+    var HR_COLOURS = {matched_active: "#0d8a72", matched_dissolved: "#b8860b", ambiguous: "#7f7f7f", none: "#a31515"};
+    var HR = {on: false, cls: {}};   // register verdict filter: AND with the dataset rows when on
+    HR_CLASSES.forEach(function (c) { HR.cls[c] = true; });
+    var RO = {on: false, ind: true, other: true};   // register-only companies (stage 4): own layer
     function srcHas(k) { return ["in", k, ["get", "src"]]; }
     function osmWants() {
       if (!OSM.on || !DS.osm) return null;
@@ -121,11 +127,17 @@
       if ($("chk-ind").checked) f.push(["==", ["get", "ind"], 1]);
       return f;
     }
-    function visibleExpr() {   // OR across datasets, AND within; plus the region filters
+    function hrExpr() {
+      if (!HR.on || !ui.register) return null;
+      var on = HR_CLASSES.filter(function (c) { return HR.cls[c]; });
+      return ["in", ["coalesce", ["get", "hr"], "none"], ["literal", on]];
+    }
+    function visibleExpr() {   // OR across datasets, AND within; plus the region + register filters
       var any = ["any"];
       var o = osmWants(); if (o) any.push(o);
       Object.keys(REG).forEach(function (k) { var w = regWants(k); if (w) any.push(w); });
       var f = ["all"].concat(regionExpr());
+      var h = hrExpr(); if (h) f.push(h);
       f.push(any.length > 1 ? any : false);
       return f;
     }
@@ -136,6 +148,7 @@
         m.reg[k] = {on: R.on, matched: R.match.matched, only: R.match.only,
                     groups: on.length < Object.keys(R.grps).length ? on : null};
       });
+      if (HR.on && ui.register) m.hr = HR_CLASSES.filter(function (c) { return HR.cls[c]; });
       return m;
     }
     function regionParams() {
@@ -165,6 +178,11 @@
       map.setPaintProperty("points", "circle-radius", ["case", o, 3, 3.5]);
       map.setPaintProperty("points", "circle-opacity", hasSel ? 0.1 : ["case", o, 0.75, 0.85]);
       map.setPaintProperty("points-ring", "circle-stroke-opacity", hasSel ? 0.25 : 1);
+      if (map.getLayer("register-only")) {
+        var roOn = RO.on ? ["in", ["get", "ind"], ["literal", [RO.ind ? 1 : -1, RO.other ? 0 : -1]]] : false;
+        map.setFilter("register-only", roOn);
+        map.setFilter("register-only-hit", roOn);
+      }
       var surf = OSM.surfOn && OSM.on ? "visible" : "none";
       map.setLayoutProperty("sites-fill", "visibility", surf);
       map.setLayoutProperty("sites-line", "visibility", surf);
@@ -209,6 +227,22 @@
         paint: {"circle-radius": 6, "circle-color": "rgba(178,34,34,0.9)", "circle-stroke-width": 1, "circle-stroke-color": "#000"}});
       map.addLayer({id: "points-hit", type: "circle", source: "companies", "source-layer": "points",
         paint: {"circle-radius": 8, "circle-opacity": 0}});
+      if (ui.register_only) {   // register-only companies: hollow squares-ish markers (black ring, no fill)
+        map.addLayer({id: "register-only", type: "circle", source: "companies", "source-layer": "register", filter: false,
+          paint: {"circle-radius": 4, "circle-color": "#ffffff", "circle-opacity": 0.6, "circle-stroke-width": 1.5,
+                  "circle-stroke-color": ["case", ["==", ["get", "ind"], 1], "#111111", "#888888"]}});
+        map.addLayer({id: "register-only-hit", type: "circle", source: "companies", "source-layer": "register", filter: false,
+          paint: {"circle-radius": 8, "circle-opacity": 0}});
+        map.on("mousemove", "register-only-hit", function (e) {
+          var f = e.features[0]; if (!f || mode) return;
+          map.getCanvas().style.cursor = "pointer";
+          hover.setLngLat(f.geometry.coordinates).setHTML("<div class='card'><b>register only:</b> " + esc(f.properties.name || "—") +
+            (f.properties.lf ? " (" + esc(f.properties.lf) + ")" : "") + "<br><span class='k'>" + esc(f.properties.reg || "") +
+            " · " + esc(f.properties.src || "") + " · geocode " + esc(f.properties.geo || "") + "</span>" +
+            (f.properties.obj ? "<br>" + esc(f.properties.obj) : "") + "</div>").addTo(map);
+        });
+        map.on("mouseleave", "register-only-hit", function () { map.getCanvas().style.cursor = ""; hover.remove(); });
+      }
       map.addLayer({id: "points-pin", type: "circle", source: "companies", "source-layer": "points",
         filter: ["==", ["get", "id"], ""], paint: {"circle-radius": 9, "circle-opacity": 0, "circle-stroke-width": 2.5, "circle-stroke-color": "#111"}});
       applyFilter();
@@ -284,6 +318,24 @@
         });
         bar.appendChild(row);
       });
+      if (ui.register_only) {   // register-only companies (stage 4): a LAYER of its own, off by default
+        var rrow = addRow("HR-only"); masterBtn(rrow, RO, "register-only companies (not on the map from any source)");
+        rrow.appendChild(mkBtn(sw("#111111") + "industrial" + nH(ui.register_only.industrial), "active register companies with an industrial business purpose, not matched by any map row", true,
+          function (b) { RO.ind = !RO.ind; b.classList.toggle("active", RO.ind); applyFilter(); }));
+        rrow.appendChild(mkBtn(sw("#888888") + "other" + nH(ui.register_only.other), "other active register companies not matched by any map row", true,
+          function (b) { RO.other = !RO.other; b.classList.toggle("active", RO.other); applyFilter(); }));
+        bar.appendChild(rrow);
+      }
+      if (ui.register) {   // register verdict row (item 6 stage 2): a FILTER, off by default
+        var hrow = addRow("HR"); masterBtn(hrow, HR, "register verdict filter");
+        HR_CLASSES.forEach(function (c) {
+          if (!(c in ui.register)) return;
+          hrow.appendChild(mkBtn(sw(HR_COLOURS[c]) + esc(HR_LABELS[c]) + nH(ui.register[c]),
+            "register join (Handelsregister via OffeneRegister / GLEIF): " + HR_LABELS[c], true,
+            function (b) { HR.cls[c] = !HR.cls[c]; b.classList.toggle("active", HR.cls[c]); applyFilter(); refreshList(); }));
+        });
+        bar.appendChild(hrow);
+      }
     }
 
     // ---- cards -----------------------------------------------------------------------------
@@ -371,9 +423,21 @@
         return "<div><span class='k'>" + esc(k) + ":</span> " + fmt(rec[k]) + "</div>";
       }).join("");
     }
+    var HR_FIELDS = ["register_match", "hr_name", "hr_matched_name", "hr_status", "hr_dissolved_date", "hr_registration", "hr_court",
+                     "legal_form", "hr_source", "hr_snapshot_date", "register_score", "hr_capital", "hr_objective", "hr_candidates", "hr_id"];
+    var WD_FIELDS = ["wd_id", "wd_operator_id", "wd_brand_id", "wd_website", "wd_industry", "wd_lei", "wd_legal_form", "wd_parent", "wd_inception", "wd_dissolved"];
+    function pickHtml(rec, keys) {
+      var sub = {}; keys.forEach(function (k) { if (rec[k] !== null && rec[k] !== undefined && rec[k] !== "") sub[k] = rec[k]; });
+      return Object.keys(sub).length ? fieldsHtml(sub, []) : "";
+    }
     function cardHtml(rec) {
       var html = "<div class='card'>" + summaryHtml(rec);
-      html += "<details><summary>merged record — all fields</summary>" + fieldsHtml(rec, SOURCE_KEYS.concat(["name"])) + "</details>";
+      var hr = rec.register_match && rec.register_match !== "n/a" ? pickHtml(rec, HR_FIELDS) : "";
+      if (hr) html += "<details" + (rec.hr_id ? " open" : "") + "><summary>register — " + esc(rec.register_match) +
+        (rec.hr_status ? " · " + esc(rec.hr_status) : "") + "</summary>" + hr + "</details>";
+      var wd = pickHtml(rec, WD_FIELDS);
+      if (wd) html += "<details><summary>wikidata</summary>" + wd + "</details>";
+      html += "<details><summary>merged record — all fields</summary>" + fieldsHtml(rec, SOURCE_KEYS.concat(["name"], HR_FIELDS, WD_FIELDS)) + "</details>";
       SOURCE_KEYS.forEach(function (k) {
         if (!Array.isArray(rec[k]) || !rec[k].length) return;
         var recs = rec[k].map(function (r, i) {
