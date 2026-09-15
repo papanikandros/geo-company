@@ -69,6 +69,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_web_hyg.add_argument("--no-propagate", action="store_true",
                            help="do not copy URLs between rows with equal name key + postcode")
     _add_common(p_web_hyg)
+    p_web_disc = web_sub.add_parser("discover", help="stage 3b: guess domains from names, DNS + one verifying fetch")
+    p_web_disc.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
+    p_web_disc.add_argument("--all", action="store_true", help="all named rows without a site (default: industrial only)")
+    p_web_disc.add_argument("--limit", type=int, default=None)
+    p_web_disc.add_argument("--dry-run", action="store_true", help="candidates + DNS only, no page fetches, no write")
+    _add_common(p_web_disc)
+
+    p_serve = sub.add_parser("serve", help="serve the merged table (item 7): build / api / push")
+    serve_sub = p_serve.add_subparsers(dest="serve_cmd", required=True)
+    p_serve_build = serve_sub.add_parser("build", help="merged table → flat/full parquet, extracts, tiles, manifest")
+    p_serve_build.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
+    p_serve_build.add_argument("--version", default=None, help="version label (default: merged_at)")
+    p_serve_build.add_argument("--no-tiles", action="store_true", help="skip the PMTiles build")
+    p_serve_build.add_argument("--force", action="store_true", help="rebuild an existing version")
+    _add_common(p_serve_build)
+    p_serve_dev = serve_sub.add_parser("dev", help="local map + JSON endpoints for a serve build (stdlib)")
+    p_serve_dev.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
+    p_serve_dev.add_argument("--version", default=None, help="serve version dir (default: latest)")
+    p_serve_dev.add_argument("--port", type=int, default=8765)
+    _add_common(p_serve_dev)
+    p_serve_api = serve_sub.add_parser("api", help="FastAPI + DuckDB API + map page (extra: serve)")
+    p_serve_api.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
+    p_serve_api.add_argument("--version", default=None, help="serve version dir (default: latest)")
+    p_serve_api.add_argument("--port", type=int, default=8791)
+    p_serve_api.add_argument("--host", default="127.0.0.1")
+    _add_common(p_serve_api)
 
     p_run = sub.add_parser("run", help="chain extract → classify → export")
     p_run.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
@@ -119,6 +145,13 @@ def main(argv: list[str] | None = None) -> int:
         from . import paths as _paths
         from .sources import wikidata as wikidata_source
         wikidata_source.enrich(_paths.data_root(args.data_dir), _config.scope_name(args.scope), fetch=not args.no_fetch)
+        return 0
+    if args.command == "web" and args.web_cmd == "discover":
+        from . import config as _config
+        from . import paths as _paths
+        from .web import discover as web_discover
+        web_discover.discover(_paths.data_root(args.data_dir), _config.scope_name(args.scope),
+                              industrial_only=not args.all, limit=args.limit, dry_run=args.dry_run)
         return 0
     if args.command == "web" and args.web_cmd == "hygiene":
         from .pipeline import run_web_hygiene
