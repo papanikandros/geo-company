@@ -271,6 +271,161 @@ def match_frame(map_df: pd.DataFrame, reg_names: pd.DataFrame, reg_companies: pd
     return result
 
 
+RESULT_COLS = ("register_match", "register_score", "hr_id", "hr_source", "hr_name", "hr_matched_name", "hr_status",
+               "hr_dissolved_date", "hr_snapshot_date", "hr_objective", "hr_capital", "hr_candidates",
+               "_legal_form", "_hr_registration", "_hr_court")
+_NUM_RE = re.compile(r"\d+")
+
+
+def _agree(reg_name: object, *names: object, cutoff: int = 70) -> bool:
+    """The register company's name and one of the given names share enough (token-set ratio
+    on the name key) — guards the exact join against a general partner's or a group parent's
+    register number in a subsidiary's imprint."""
+    rk = normalize_name(reg_name, strip_noise=True)
+    if not rk:
+        return False
+    for n in names:
+        if not isinstance(n, str) or not n.strip():
+            continue
+        k = normalize_name(n, strip_noise=True)
+        if k and (fuzz.token_set_ratio(rk, k) >= cutoff or fuzz.partial_ratio(rk, k) >= 90):
+            return True
+    return False
+
+
+def exact_frame(map_df: pd.DataFrame, companies: pd.DataFrame, scope_plz: set[str]) -> pd.DataFrame:
+    """Stage 2a — the deterministic join: a row whose imprint names the company
+    (``website_verified`` name+plz / name) and carries a register number is joined to the
+    register company with the same register type + number and court. Without a court in
+    the imprint (or for GLEIF rows, which carry none) the type + number must belong to ONE
+    company among the scope's register companies. ``register_match = exact_hrb``, score 100
+    with court, 99 without. Returns a frame like ``match_frame`` (NA where no exact join)."""
+    result = pd.DataFrame(index=map_df.index)
+    for c in RESULT_COLS:
+        result[c] = pd.NA
+    if "imp_register_no" not in map_df.columns or "website_verified" not in map_df.columns:
+        return result
+    ok = map_df["website_verified"].isin(["name+plz", "name"]) & map_df["imp_register_no"].notna()
+    if not ok.any():
+        return result
+    comp = companies[companies["register_number"].notna() & companies["register_type"].notna()].copy()
+    comp["_type"] = comp["register_type"].astype(str).str.upper()
+    comp["_num"] = comp["register_number"].astype(str).map(lambda x: (_NUM_RE.search(x) or [None])[0] if _NUM_RE.search(x) else None)
+    comp = comp[comp["_num"].notna()]
+    comp["_court"] = comp["court"].map(lambda c: c.lower().strip() if isinstance(c, str) else None)
+    comp["_srank"] = comp["hr_source"].map(SOURCE_PRIORITY).fillna(9)
+    comp["_active"] = (comp["status"] == "active").astype(int)
+    comp["_in_scope"] = comp["postcode"].astype("string").isin(scope_plz).fillna(False)
+    comp = comp.sort_values(["_srank", "_active"], ascending=[True, False])
+    comp["_suffix"] = comp["register_number"].astype(str).str.extract(r"\d\s*([A-Za-z]{1,3})\s*$")[0].str.upper()
+    groups = {k: g for k, g in comp.groupby(["_type", "_num"], sort=False)}
+    n_court = n_unique = n_other = 0
+    for idx, row in map_df[ok].iterrows():
+        typ = str(row["imp_register_type"]).upper() if isinstance(row.get("imp_register_type"), str) else "HRB"
+        num = str(row["imp_register_no"]).lstrip("0") or "0"
+        grp = groups.get((typ, num))
+        if grp is None:
+            continue
+        court = row.get("imp_court")
+        reg = str(row.get("imp_registration") or "")
+        suffix = reg.split()[-1].upper() if len(reg.split()) == 3 else None
+        if suffix:   # "HRB 202125 OL": a register suffix names the court — rows with another suffix are out
+            grp = grp[grp["_suffix"].isna() | (grp["_suffix"] == suffix)]
+            if grp.empty:
+                continue
+        rec, score = None, None
+        if isinstance(court, str) and court.strip():
+            hit = grp[grp["_court"] == court.lower().strip()]
+            if len(hit):
+                rec, score = hit.iloc[0], 100.0
+            else:   # courtless register rows (GLEIF) of that number inside the scope
+                hit = grp[grp["_court"].isna() & grp["_in_scope"]]
+                if len(hit) and hit["name_key_full"].nunique() == 1:
+                    rec, score = hit.iloc[0], 99.0
+        else:
+            hit = grp[grp["_in_scope"]]
+            if len(hit) and hit["name_key_full"].nunique() == 1:
+                rec, score = hit.iloc[0], 99.0
+        if rec is None:
+            continue
+        # the number must name THIS company: its register name agrees with the map name or
+        # with the imprint's own legal-name line — else it is a general partner / parent
+        if not _agree(rec["name"], row.get("name"), row.get("imp_legal_name")):
+            n_other += 1
+            result.at[idx, "hr_candidates"] = json.dumps([{
+                "hr_id": rec["hr_id"], "source": rec["hr_source"], "score": score, "type": "imprint_number",
+                "name": rec["name"], "status": rec["status"],
+                "note": "imprint register number names another entity (general partner / parent?) — not joined"}],
+                ensure_ascii=False, default=str)
+            continue
+        if score == 100.0:
+            n_court += 1
+        else:
+            n_unique += 1
+        result.at[idx, "register_match"] = "exact_hrb"
+        result.at[idx, "register_score"] = score
+        result.at[idx, "hr_id"] = rec["hr_id"]
+        result.at[idx, "hr_source"] = rec["hr_source"]
+        result.at[idx, "hr_name"] = rec["name"]
+        result.at[idx, "hr_matched_name"] = row.get("imp_legal_name") if isinstance(row.get("imp_legal_name"), str) else rec["name"]
+        result.at[idx, "hr_status"] = rec["status"]
+        result.at[idx, "hr_dissolved_date"] = rec["dissolved"]
+        result.at[idx, "hr_snapshot_date"] = rec["snapshot_date"]
+        result.at[idx, "hr_objective"] = rec["objective"]
+        result.at[idx, "hr_capital"] = rec["capital_amount"]
+        result.at[idx, "_legal_form"] = rec["legal_form"]
+        result.at[idx, "_hr_registration"] = rec["hr_registration"]
+        result.at[idx, "_hr_court"] = rec["court"]
+    print(f"[register] exact join: {int(ok.sum())} rows with a verified imprint number, "
+          f"{n_court} joined by number + court, {n_unique} by a number unique in the scope, "
+          f"{n_other} numbers naming another entity (kept as candidate)")
+    return result
+
+
+def merge_exact(result: pd.DataFrame, exact: pd.DataFrame) -> pd.DataFrame:
+    """Combine the exact join with the probabilistic one row for row. The exact join wins
+    when the name join found nothing, was ambiguous or weak (score < 90), or names the same
+    firm (same register company, same register number, or near-identical name — a firm that
+    moved court and got a fresher number). A STRONG name join to a different firm is kept:
+    the imprint then names the site's owner (a parent, a general partner, a successor at
+    the same address), which is recorded in hr_candidates for the audit."""
+    out = result.copy()
+    keys = {}
+    for idx in exact.index[exact["register_match"].notna()]:
+        strong = result.at[idx, "register_match"] in MATCH_RANK and \
+            pd.notna(result.at[idx, "register_score"]) and float(result.at[idx, "register_score"]) >= 90
+        take = True
+        if strong:
+            same_id = str(result.at[idx, "hr_id"]) == str(exact.at[idx, "hr_id"])
+            same_reg = normalize_registration(result.at[idx, "_hr_registration"]) == normalize_registration(exact.at[idx, "_hr_registration"])
+            ka = normalize_name(result.at[idx, "hr_name"], strip_noise=True)
+            kb = normalize_name(exact.at[idx, "hr_name"], strip_noise=True)
+            same_firm = bool(ka) and bool(kb) and fuzz.ratio(ka, kb) >= 90
+            take = same_id or same_reg or same_firm
+        if take:
+            for c in RESULT_COLS:
+                if c != "hr_candidates":
+                    out.at[idx, c] = exact.at[idx, c]
+            if strong and str(result.at[idx, "hr_id"]) != str(exact.at[idx, "hr_id"]):
+                out.at[idx, "hr_candidates"] = json.dumps([{
+                    "hr_id": result.at[idx, "hr_id"], "source": result.at[idx, "hr_source"], "score": result.at[idx, "register_score"],
+                    "type": result.at[idx, "register_match"], "name": result.at[idx, "hr_name"],
+                    "note": "name join, replaced by the exact join (same firm)"}], ensure_ascii=False, default=str)
+        else:
+            out.at[idx, "hr_candidates"] = json.dumps([{
+                "hr_id": exact.at[idx, "hr_id"], "source": exact.at[idx, "hr_source"], "score": exact.at[idx, "register_score"],
+                "type": "imprint_number", "name": exact.at[idx, "hr_name"], "status": exact.at[idx, "hr_status"],
+                "note": "imprint register number names the site's owner, a different firm — name join kept"}],
+                ensure_ascii=False, default=str)
+        keys[idx] = take
+    note = exact["hr_candidates"].notna() & exact["register_match"].isna() & out["hr_candidates"].isna()
+    out.loc[note, "hr_candidates"] = exact.loc[note, "hr_candidates"]
+    n_take = sum(keys.values())
+    print(f"[register] exact join merged: {n_take} rows take the exact join, {len(keys) - n_take} keep a strong name join "
+          f"(imprint names the site owner)")
+    return out
+
+
 def apply_match(gdf: pd.DataFrame, result: pd.DataFrame) -> pd.DataFrame:
     """Write the result columns into the Company frame (additive; contract fields filled
     where empty; hr_registration normalised everywhere)."""
@@ -292,6 +447,10 @@ def apply_match(gdf: pd.DataFrame, result: pd.DataFrame) -> pd.DataFrame:
     gdf["hr_registration"] = cur.where(has_prefix | new.isna(), new)
     gdf["hr_registration"] = gdf["hr_registration"].map(normalize_registration, na_action="ignore").astype("string")
     matched = gdf["register_match"].isin(list(MATCH_RANK) + ["exact_hrb"])
+    if "legal_name" not in gdf.columns:
+        gdf["legal_name"] = pd.array([None] * len(gdf), dtype="string")
+    ln = gdf["legal_name"].astype("string")
+    gdf["legal_name"] = ln.where(ln.notna() & (ln.str.strip() != ""), gdf["hr_name"].astype("string").where(matched))
     # confidence: matched active +0.10, matched dissolved −0.10 (spec §5.4 amendment, clipped 0–1)
     conf = pd.to_numeric(gdf["confidence_score"], errors="coerce").astype(float)
     conf = conf + np.where(matched & (gdf["hr_status"] == "active"), 0.10, 0.0) \
@@ -319,6 +478,8 @@ def run(data_root: Path, scope: str, sources: list[str] | None = None) -> pd.Dat
     print(f"[register] scope {scope}: {len(gdf)} map rows, {len(names)} register name variants in scope "
           f"({names['hr_source'].value_counts().to_dict()})")
     result = match_frame(gdf, names, companies)
+    exact = exact_frame(gdf, companies, plz)
+    result = merge_exact(result, exact)
     gdf = apply_match(gdf, result)
     rep = gdf["register_match"].value_counts(dropna=False).to_dict()
     print(f"[register] register_match: {rep}; industrial matched: "

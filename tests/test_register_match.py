@@ -119,3 +119,48 @@ def test_normalizers():
     assert match.normalize_registration("Bremen HRB 541657 HB") == "HRB 541657 HB"
     assert match.normalize_registration("541657") == "541657"
     assert match.normalize_registration(None) is None
+
+
+def test_exact_join_by_imprint_number():
+    from geoextract.register.match import exact_frame, merge_exact
+    map_df = pd.DataFrame({
+        "id": ["m1", "m2", "m3", "m4"],
+        "name": ["Weser Stahlbau", "Hansa Druck", "Nordkraft", "Fremdseite"],
+        "website_verified": ["name+plz", "name", "name", "mismatch"],
+        "imp_register_type": ["HRB", "HRB", "HRB", "HRB"],
+        "imp_register_no": ["1234", "777", "555", "1234"],
+        "imp_court": ["Bremen", None, None, "Bremen"],
+        "imp_legal_name": ["Weser Stahlbau GmbH", None, None, None],
+    })
+    comp = _companies([
+        ("hr2022", "H1", "Weser Stahlbau GmbH", "active", None, "2022-08-01", "Stahlbau", None, "GmbH", "HRB 1234 HB", "Bremen"),
+        ("hr2022", "H2", "Weser Stahlbau Süd GmbH", "active", None, "2022-08-01", None, None, "GmbH", "HRB 1234", "München"),
+        ("gleif", "G1", "Hansa Druck GmbH", "active", None, "2026-09-07", None, None, "GmbH", "HRB 777", None),
+        ("hr2022", "H3", "Nordkraft GmbH", "active", None, "2022-08-01", None, None, "GmbH", "HRB 555", "Bremen"),
+        ("hr2019", "H4", "Nordkraft Beteiligungs GmbH", "active", None, "2019-01-01", None, None, "GmbH", "HRB 555", "Hamburg"),
+    ])
+    comp["register_type"] = "HRB"
+    comp["register_number"] = comp["hr_registration"].str.replace("HRB ", "")
+    comp["postcode"] = ["28237", "80331", "28195", "28195", "20095"]
+    from geoextract.resolve import normalize_name
+    comp["name_key_full"] = comp["name"].map(lambda n: normalize_name(n, strip_noise=True))
+    ex = exact_frame(map_df, comp, scope_plz={"28237", "28195"})
+    assert ex.loc[0, "register_match"] == "exact_hrb" and ex.loc[0, "hr_id"] == "H1" and ex.loc[0, "register_score"] == 100
+    assert ex.loc[1, "hr_id"] == "G1" and ex.loc[1, "register_score"] == 99          # courtless GLEIF row, unique in scope
+    assert ex.loc[2, "hr_id"] == "H3"                                              # Hamburg twin is outside the scope
+    assert pd.isna(ex.loc[3, "register_match"])                                    # a mismatch site never joins
+    prob = pd.DataFrame(index=map_df.index)
+    for c in ex.columns:
+        prob[c] = pd.NA
+    # a weak name join (88) to another firm: the exact join wins, nothing to audit
+    prob.loc[0, ["register_match", "hr_id", "hr_source", "hr_name", "register_score"]] = ["name_plz", "H2", "hr2022", "Weser Stahlbau Süd GmbH", 88.0]
+    merged = merge_exact(prob, ex)
+    assert merged.loc[0, "hr_id"] == "H1" and pd.isna(merged.loc[0, "hr_candidates"])
+    # a strong name join (95) to another firm: kept, the imprint's owner goes to the audit column
+    prob.loc[0, "register_score"] = 95.0
+    merged = merge_exact(prob, ex)
+    assert merged.loc[0, "hr_id"] == "H2" and "site's owner" in merged.loc[0, "hr_candidates"]
+    # a strong name join to the SAME firm under another number (moved court): the exact join wins
+    prob.loc[0, ["hr_name"]] = ["Weser Stahlbau GmbH"]
+    merged = merge_exact(prob, ex)
+    assert merged.loc[0, "hr_id"] == "H1" and "same firm" in merged.loc[0, "hr_candidates"]

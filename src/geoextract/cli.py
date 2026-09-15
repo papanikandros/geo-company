@@ -75,6 +75,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_web_disc.add_argument("--limit", type=int, default=None)
     p_web_disc.add_argument("--dry-run", action="store_true", help="candidates + DNS only, no page fetches, no write")
     _add_common(p_web_disc)
+    p_web_imp = web_sub.add_parser("impressum", help="stage 1: fetch the imprint of every own website, extract the legal fields")
+    p_web_imp.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
+    p_web_imp.add_argument("--all", action="store_true", help="all own-website rows (default: industrial only)")
+    p_web_imp.add_argument("--limit", type=int, default=None)
+    p_web_imp.add_argument("--workers", type=int, default=8)
+    p_web_imp.add_argument("--refetch", action="store_true", help="ignore the host cache")
+    p_web_imp.add_argument("--reextract", action="store_true", help="re-run the extractor on the cached imprint texts (no network)")
+    _add_common(p_web_imp)
 
     p_serve = sub.add_parser("serve", help="serve the merged table (item 7): build / api / push")
     serve_sub = p_serve.add_subparsers(dest="serve_cmd", required=True)
@@ -152,6 +160,14 @@ def main(argv: list[str] | None = None) -> int:
         from .web import discover as web_discover
         web_discover.discover(_paths.data_root(args.data_dir), _config.scope_name(args.scope),
                               industrial_only=not args.all, limit=args.limit, dry_run=args.dry_run)
+        return 0
+    if args.command == "web" and args.web_cmd == "impressum":
+        from . import config as _config
+        from . import paths as _paths
+        from .web import impressum as web_impressum
+        web_impressum.run(_paths.data_root(args.data_dir), _config.scope_name(args.scope),
+                          industrial_only=not args.all, limit=args.limit, workers=args.workers, refetch=args.refetch,
+                          reextract=args.reextract)
         return 0
     if args.command == "web" and args.web_cmd == "hygiene":
         from .pipeline import run_web_hygiene
