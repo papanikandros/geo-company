@@ -51,6 +51,22 @@ services:
     profiles: ["build"]
     command: ["serve", "build", "--scope", "${SCOPE:-DE}", "--force"]
 
+  # local metasearch for the website discovery stage (register-website-pipeline-plan.md 3d):
+  #   docker compose --profile search up -d searxng   → http://127.0.0.1:8888/ (JSON API)
+  # never part of the public stack; bound to the loopback address only
+  searxng:
+    image: searxng/searxng:latest
+    profiles: ["search"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      SEARXNG_BASE_URL: http://127.0.0.1:8888/
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+
 volumes:
   caddy_data:
   caddy_config:

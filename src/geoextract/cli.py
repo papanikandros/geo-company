@@ -91,6 +91,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_web_cc.add_argument("--workers", type=int, default=8)
     p_web_cc.add_argument("--dry-run", action="store_true", help="candidates only, no fetch, no write")
     _add_common(p_web_cc)
+    p_web_se = web_sub.add_parser("search", help="stage 3d: website discovery through the local SearXNG (train the ranker / run it)")
+    p_web_se.add_argument("se_cmd", choices=["train", "run"], help="train on companies with a verified site / apply to the residual")
+    p_web_se.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
+    p_web_se.add_argument("--all", action="store_true", help="all named rows (default: industrial only for run; all verified rows for train)")
+    p_web_se.add_argument("--limit", type=int, default=None)
+    p_web_se.add_argument("--topk", type=int, default=3, help="hosts fetched per company for imprint verification")
+    p_web_se.add_argument("--threshold", type=float, default=0.3, help="minimum ranker probability of a host to be fetched")
+    p_web_se.add_argument("--workers", type=int, default=8)
+    p_web_se.add_argument("--dry-run", action="store_true", help="queries + ranking only, no imprint fetch, no write")
+    _add_common(p_web_se)
 
     p_serve = sub.add_parser("serve", help="serve the merged table (item 7): build / api / push")
     serve_sub = p_serve.add_subparsers(dest="serve_cmd", required=True)
@@ -187,6 +197,17 @@ def main(argv: list[str] | None = None) -> int:
         else:
             ccindex.match(root, _config.scope_name(args.scope), industrial_only=not args.all, limit=args.limit,
                           workers=args.workers, dry_run=args.dry_run)
+        return 0
+    if args.command == "web" and args.web_cmd == "search":
+        from . import config as _config
+        from . import paths as _paths
+        from .web import search as web_search
+        root, scope = _paths.data_root(args.data_dir), _config.scope_name(args.scope)
+        if args.se_cmd == "train":
+            web_search.train(root, scope, industrial_only=False, limit=args.limit)
+        else:
+            web_search.run(root, scope, industrial_only=not args.all, limit=args.limit, topk=args.topk,
+                           threshold=args.threshold, workers=args.workers, dry_run=args.dry_run)
         return 0
     if args.command == "web" and args.web_cmd == "hygiene":
         from .pipeline import run_web_hygiene

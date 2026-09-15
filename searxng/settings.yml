@@ -1,0 +1,25 @@
+# SearXNG for geoextract stage 3d (register-website-pipeline-plan.md): a local metasearch
+# service used ONLY by `geoextract web search` — bound to 127.0.0.1, no rate limiter, JSON
+# output enabled, general web engines with German results (the ones that still answer from
+# a single address: yahoo, mojeek; brave / duckduckgo / qwant block within minutes).
+use_default_settings:
+  engines:
+    keep_only: [yahoo, mojeek, duckduckgo, brave, qwant, startpage]
+general:
+  debug: false
+  instance_name: "geoextract search"
+  enable_metrics: false
+server:
+  secret_key: "geoextract-local-only-not-public"
+  limiter: false
+  image_proxy: false
+  port: 8080
+  bind_address: "0.0.0.0"
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "de-DE"
+  formats: [html, json]
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 12.0
