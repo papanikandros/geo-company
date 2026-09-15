@@ -83,6 +83,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_web_imp.add_argument("--refetch", action="store_true", help="ignore the host cache")
     p_web_imp.add_argument("--reextract", action="store_true", help="re-run the extractor on the cached imprint texts (no network)")
     _add_common(p_web_imp)
+    p_web_cc = web_sub.add_parser("ccindex", help="stage 3c: website candidates from the Common Crawl .de domain list")
+    p_web_cc.add_argument("cc_cmd", choices=["build", "match"], help="build the sorted .de index / match companies against it")
+    p_web_cc.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
+    p_web_cc.add_argument("--all", action="store_true", help="all named rows without a verified site (default: industrial only)")
+    p_web_cc.add_argument("--limit", type=int, default=None)
+    p_web_cc.add_argument("--workers", type=int, default=8)
+    p_web_cc.add_argument("--dry-run", action="store_true", help="candidates only, no fetch, no write")
+    _add_common(p_web_cc)
 
     p_serve = sub.add_parser("serve", help="serve the merged table (item 7): build / api / push")
     serve_sub = p_serve.add_subparsers(dest="serve_cmd", required=True)
@@ -168,6 +176,17 @@ def main(argv: list[str] | None = None) -> int:
         web_impressum.run(_paths.data_root(args.data_dir), _config.scope_name(args.scope),
                           industrial_only=not args.all, limit=args.limit, workers=args.workers, refetch=args.refetch,
                           reextract=args.reextract)
+        return 0
+    if args.command == "web" and args.web_cmd == "ccindex":
+        from . import config as _config
+        from . import paths as _paths
+        from .web import ccindex
+        root = _paths.data_root(args.data_dir)
+        if args.cc_cmd == "build":
+            ccindex.build(root)
+        else:
+            ccindex.match(root, _config.scope_name(args.scope), industrial_only=not args.all, limit=args.limit,
+                          workers=args.workers, dry_run=args.dry_run)
         return 0
     if args.command == "web" and args.web_cmd == "hygiene":
         from .pipeline import run_web_hygiene
