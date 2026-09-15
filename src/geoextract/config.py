@@ -435,6 +435,9 @@ REGISTER_INDUSTRIAL_EXCLUDE = (
     "softwareentwicklung", "software", "planung", "ingenieur", "architekt",
 )
 
+# Item 6c (sources/wikidata.py) + stage 3b (web/discover.py): identify ourselves per the
+# Wikimedia User-Agent policy; the same string is used for the one-page verification fetches.
+WIKIDATA_USER_AGENT = "geoextract/0.1 (wikidata enrichment; https://github.com/EnergiaConsult/geo-company)"
 
 # --- Register + website pipeline (queue item 6, register-website-pipeline-plan.md) ----------
 # Stage 0a–0c: bulk register files (never the 60 req/h portal). Paths relative to the data root.
