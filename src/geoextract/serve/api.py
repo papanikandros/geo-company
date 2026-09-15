@@ -42,7 +42,7 @@ from .dev import WEB_DIR, _jsonable, latest_version
 MAX_JSON = 50_000
 DEFAULT_JSON = 1_000
 FORMATS = ("json", "geojson", "csv", "parquet")
-SOURCE_KEYS = list(config.SERVE_SOURCE_PREFIXES) + ["register"]
+SOURCE_KEYS = list(config.SERVE_SOURCE_PREFIXES) + ["register", "wikidata"]   # nested columns of tier 2
 
 
 class Store:
@@ -112,15 +112,17 @@ class Store:
                     c.append(f"coalesce({gprop[ds]}, '{default}') IN (" + ", ".join("?" * len(groups)) + ")")
                     params += list(groups)
             parts.append("(" + " AND ".join(c) + ")")
+        hr = display.get("hr")           # register-matched companies: a dataset row of its own (OR)
+        if isinstance(hr, list) and hr:
+            parts.append("coalesce(hr, 'none') IN (" + ", ".join("?" * len(hr)) + ")")
+            params += list(hr)
+        wd = display.get("wd")           # wikidata-linked companies (any of the kinds): OR as well
+        if isinstance(wd, list) and wd:
+            parts.append("(" + " OR ".join("contains(coalesce(wd, ''), ?)" for _ in wd) + ")")
+            params += [f"+{k}+" for k in wd]
         if not parts:
             return "FALSE", []
         expr = "(" + " OR ".join(parts) + ")"
-        hr = display.get("hr")           # register verdict classes (AND with the dataset rows)
-        if isinstance(hr, list):
-            if not hr:
-                return "FALSE", []
-            expr += " AND coalesce(hr, 'none') IN (" + ", ".join("?" * len(hr)) + ")"
-            params += list(hr)
         return expr, params
 
     def where(self, state=None, district=None, sector=None, industrial=None, bbox=None,

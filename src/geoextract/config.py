@@ -513,6 +513,8 @@ WEBSITE_TRACKING_PARAMS = ("utm_", "fbclid", "gclid", "mc_cid", "mc_eid", "ref")
 SERVE_PUBLIC_DROP = {"email", "geometry"}          # never in a public download
 SERVE_EXTRA_PUBLIC = ["website_kind", "website_host", "website_listing", "website_source",
                       "hr_name", "hr_matched_name", "register_score", "hr_candidates",
+                      "wd_id", "wd_operator_id", "wd_brand_id", "wd_website", "wd_industry", "wd_lei",
+                      "wd_legal_form", "wd_parent", "wd_inception", "wd_dissolved",
                       "member_ids"]                 # debug columns that ARE public (tier 1)
 # columns of a raw source record that are merge bookkeeping, not the source's own data
 SERVE_RAW_DROP = {"email", "geometry", "source", "source_count", "confidence_score",

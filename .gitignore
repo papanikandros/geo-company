@@ -19,3 +19,4 @@ output/
 # Secrets
 .env
 research/
+docker-compose.override.yml

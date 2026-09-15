@@ -20,6 +20,7 @@ import datetime as _dt
 import json
 import math
 import mimetypes
+import os
 import re
 import threading
 from http import HTTPStatus
@@ -31,7 +32,7 @@ import duckdb
 
 from ..resolve import normalize_name
 
-WEB_DIR = Path(__file__).parent / "web"
+WEB_DIR = Path(os.environ.get("GEOEXTRACT_WEB_DIR") or Path(__file__).parent / "web")   # override: live page files
 _RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
 
 

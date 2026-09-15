@@ -55,12 +55,14 @@
 
     // ---- map -----------------------------------------------------------------------------
     var bbox = ui.bbox;
+    var tileMeta = manifest.files && manifest.files["companies.pmtiles"];
+    var tileVersion = tileMeta ? tileMeta.sha256.slice(0, 12) : manifest.generated_at;
     var map = new maplibregl.Map({
       container: "map",
       style: {version: 8,
         sources: {base: {type: "raster", tiles: [BASEMAP], tileSize: 256, maxzoom: 19,
                          attribution: "© OpenStreetMap contributors"},
-                  companies: {type: "vector", tiles: ["pmtiles://" + new URL(DATA + "/companies.pmtiles", location.href).href + "/{z}/{x}/{y}"],
+                  companies: {type: "vector", tiles: ["pmtiles://" + new URL(DATA + "/companies.pmtiles?v=" + tileVersion, location.href).href + "/{z}/{x}/{y}"],
                               minzoom: ui.tile_minzoom || 4, maxzoom: ui.tile_maxzoom || 14}},
         layers: [{id: "base", type: "raster", source: "base"}]},
       bounds: [[bbox[0], bbox[1]], [bbox[2], bbox[3]]], fitBoundsOptions: {padding: 20},
@@ -91,12 +93,14 @@
       Object.keys(DS[k].groups).forEach(function (g) { REG[k].grps[g] = true; });
     });
     var GPROP = {ied: "ied", abwaerme: "abw", overture: "bt", mastr: "mt"};
-    var HR_CLASSES = ["matched_active", "matched_dissolved", "ambiguous", "none"];
     var HR_LABELS = {matched_active: "matched · active", matched_dissolved: "matched · dissolved", ambiguous: "ambiguous", none: "no match"};
+    var WD_LABELS = {e: "entity item", o: "operator item", b: "brand item", w: "website from Wikidata"};
+    var WD = {on: false, matched: true, only: true};   // Wikidata row: matched = dots with an entity/operator item, only = items with coordinates but no map entity
+    var WD_MATCHED = ["e", "o"];
+    var WD_COLOUR = "#2b6cb0";
     var HR_COLOURS = {matched_active: "#0d8a72", matched_dissolved: "#b8860b", ambiguous: "#7f7f7f", none: "#a31515"};
-    var HR = {on: false, cls: {}};   // register verdict filter: AND with the dataset rows when on
-    HR_CLASSES.forEach(function (c) { HR.cls[c] = true; });
-    var RO = {on: false, ind: true, other: true};   // register-only companies (stage 4): own layer
+    var HR = {on: false, matched: true, only: true};   // Register row: matched = validation of the map dots, only = register companies with no map entity
+    var HR_MATCHED = ["matched_active", "matched_dissolved"];
     function srcHas(k) { return ["in", k, ["get", "src"]]; }
     function osmWants() {
       if (!OSM.on || !DS.osm) return null;
@@ -127,17 +131,21 @@
       if ($("chk-ind").checked) f.push(["==", ["get", "ind"], 1]);
       return f;
     }
-    function hrExpr() {
-      if (!HR.on || !ui.register) return null;
-      var on = HR_CLASSES.filter(function (c) { return HR.cls[c]; });
-      return ["in", ["coalesce", ["get", "hr"], "none"], ["literal", on]];
+    function hrWants() {   // Register row: the register-matched companies, added like any other dataset
+      if (!HR.on || !HR.matched || !ui.register) return null;
+      return ["in", ["coalesce", ["get", "hr"], "none"], ["literal", HR_MATCHED]];
     }
-    function visibleExpr() {   // OR across datasets, AND within; plus the region + register filters
+    function wdWants() {   // Wikidata row: companies with an entity or operator item
+      if (!WD.on || !WD.matched || !ui.wikidata) return null;
+      return ["any"].concat(WD_MATCHED.map(function (k) { return ["in", "+" + k + "+", ["coalesce", ["get", "wd"], ""]]; }));
+    }
+    function visibleExpr() {   // OR across datasets (incl. Register + Wikidata), AND within; plus the region filters
       var any = ["any"];
       var o = osmWants(); if (o) any.push(o);
       Object.keys(REG).forEach(function (k) { var w = regWants(k); if (w) any.push(w); });
+      var h = hrWants(); if (h) any.push(h);
+      var wdw = wdWants(); if (wdw) any.push(wdw);
       var f = ["all"].concat(regionExpr());
-      var h = hrExpr(); if (h) f.push(h);
       f.push(any.length > 1 ? any : false);
       return f;
     }
@@ -148,7 +156,8 @@
         m.reg[k] = {on: R.on, matched: R.match.matched, only: R.match.only,
                     groups: on.length < Object.keys(R.grps).length ? on : null};
       });
-      if (HR.on && ui.register) m.hr = HR_CLASSES.filter(function (c) { return HR.cls[c]; });
+      if (HR.on && HR.matched && ui.register) m.hr = HR_MATCHED;
+      if (WD.on && WD.matched && ui.wikidata) m.wd = WD_MATCHED;
       return m;
     }
     function regionParams() {
@@ -166,8 +175,13 @@
     var query = "";
     var listed = [];          // rows shown in the table (selection rows or search hits)
 
+    function anyLayerOn() {
+      return (OSM.on && !!DS.osm) || Object.keys(REG).some(function (k) { return REG[k].on; }) ||
+        (HR.on && !!ui.register) || (WD.on && !!ui.wikidata);
+    }
     function applyFilter() {
       if (!map.getLayer("points")) return;
+      $("pv-hint").hidden = anyLayerOn();
       var vis = visibleExpr(), o = osmWants() || false;
       var hasSel = !!selected;
       map.setFilter("points", vis);
@@ -179,9 +193,14 @@
       map.setPaintProperty("points", "circle-opacity", hasSel ? 0.1 : ["case", o, 0.75, 0.85]);
       map.setPaintProperty("points-ring", "circle-stroke-opacity", hasSel ? 0.25 : 1);
       if (map.getLayer("register-only")) {
-        var roOn = RO.on ? ["in", ["get", "ind"], ["literal", [RO.ind ? 1 : -1, RO.other ? 0 : -1]]] : false;
+        var roOn = HR.on && HR.only ? ["has", "id"] : false;
         map.setFilter("register-only", roOn);
         map.setFilter("register-only-hit", roOn);
+      }
+      if (map.getLayer("wikidata-only")) {
+        var woOn = WD.on && WD.only ? ["has", "id"] : false;
+        map.setFilter("wikidata-only", woOn);
+        map.setFilter("wikidata-only-hit", woOn);
       }
       var surf = OSM.surfOn && OSM.on ? "visible" : "none";
       map.setLayoutProperty("sites-fill", "visibility", surf);
@@ -243,12 +262,27 @@
         });
         map.on("mouseleave", "register-only-hit", function () { map.getCanvas().style.cursor = ""; hover.remove(); });
       }
+      if (ui.wikidata && ui.wikidata.only) {   // wikidata-only companies: blue ring, no fill
+        map.addLayer({id: "wikidata-only", type: "circle", source: "companies", "source-layer": "wikidata", filter: false,
+          paint: {"circle-radius": 4, "circle-color": "#ffffff", "circle-opacity": 0.6, "circle-stroke-width": 1.5, "circle-stroke-color": WD_COLOUR}});
+        map.addLayer({id: "wikidata-only-hit", type: "circle", source: "companies", "source-layer": "wikidata", filter: false,
+          paint: {"circle-radius": 8, "circle-opacity": 0}});
+        map.on("mousemove", "wikidata-only-hit", function (e) {
+          var f = e.features[0]; if (!f || mode) return;
+          map.getCanvas().style.cursor = "pointer";
+          hover.setLngLat(f.geometry.coordinates).setHTML("<div class='card'><b>wikidata only:</b> " + esc(f.properties.name || "—") +
+            "<br><span class='k'>" + esc(f.properties.id || "") + " · " + esc(f.properties.role || "") + " item of a map company" +
+            (f.properties.ind ? " · " + esc(f.properties.ind) : "") + "</span>" +
+            (f.properties.web ? "<br><a class='pv-link' href='" + esc(webUrl(f.properties.web)) + "' target='_blank' rel='noopener'>" + esc(f.properties.web) + "</a>" : "") + "</div>").addTo(map);
+        });
+        map.on("mouseleave", "wikidata-only-hit", function () { map.getCanvas().style.cursor = ""; hover.remove(); });
+      }
       map.addLayer({id: "points-pin", type: "circle", source: "companies", "source-layer": "points",
         filter: ["==", ["get", "id"], ""], paint: {"circle-radius": 9, "circle-opacity": 0, "circle-stroke-width": 2.5, "circle-stroke-color": "#111"}});
       applyFilter();
-      buildBar();
       renderTable();
     });
+    buildBar();   // the toolbar needs only the model — it shows even before the tiles are drawn
     ["sel-state", "sel-district", "sel-sector", "chk-ind"].forEach(function (id) {
       $(id).addEventListener("change", function () {
         if (id === "sel-state") {
@@ -318,23 +352,25 @@
         });
         bar.appendChild(row);
       });
-      if (ui.register_only) {   // register-only companies (stage 4): a LAYER of its own, off by default
-        var rrow = addRow("HR-only"); masterBtn(rrow, RO, "register-only companies (not on the map from any source)");
-        rrow.appendChild(mkBtn(sw("#111111") + "industrial" + nH(ui.register_only.industrial), "active register companies with an industrial business purpose, not matched by any map row", true,
-          function (b) { RO.ind = !RO.ind; b.classList.toggle("active", RO.ind); applyFilter(); }));
-        rrow.appendChild(mkBtn(sw("#888888") + "other" + nH(ui.register_only.other), "other active register companies not matched by any map row", true,
-          function (b) { RO.other = !RO.other; b.classList.toggle("active", RO.other); applyFilter(); }));
-        bar.appendChild(rrow);
-      }
-      if (ui.register) {   // register verdict row (item 6 stage 2): a FILTER, off by default
-        var hrow = addRow("HR"); masterBtn(hrow, HR, "register verdict filter");
-        HR_CLASSES.forEach(function (c) {
-          if (!(c in ui.register)) return;
-          hrow.appendChild(mkBtn(sw(HR_COLOURS[c]) + esc(HR_LABELS[c]) + nH(ui.register[c]),
-            "register join (Handelsregister via OffeneRegister / GLEIF): " + HR_LABELS[c], true,
-            function (b) { HR.cls[c] = !HR.cls[c]; b.classList.toggle("active", HR.cls[c]); applyFilter(); refreshList(); }));
-        });
+      if (ui.register) {   // Register row: "matched" validates the dots that are on, "register-only" adds the register companies with no map entity
+        var hrow = addRow("Register"); masterBtn(hrow, HR, "Register (Handelsregister via OffeneRegister / GLEIF)");
+        hrow.appendChild(mkBtn(swatch(HR_COLOURS.matched_active) + "matched" + nHtml(ui.register.matched || 0),
+          "show/hide the companies matched to a register company (active or dissolved — see the card)",
+          function (b) { HR.matched = !HR.matched; b.classList.toggle("active", HR.matched); applyFilter(); refreshList(); }));
+        if (ui.register_only) hrow.appendChild(mkBtn(swatch("#111111") + "register-only" + nHtml(ui.register.only || 0),
+          "active register companies with a Bremen address that no map row matched (geocoded offline against OSM addresses; black ring = industrial business purpose)",
+          function (b) { HR.only = !HR.only; b.classList.toggle("active", HR.only); applyFilter(); refreshList(); }));
         bar.appendChild(hrow);
+      }
+      if (ui.wikidata) {   // Wikidata row: "matched" validates the dots that are on, "wikidata-only" adds items with coordinates but no map entity
+        var wrow = addRow("Wikidata"); masterBtn(wrow, WD, "Wikidata");
+        wrow.appendChild(mkBtn(swatch(WD_COLOUR) + "matched" + nHtml(ui.wikidata.matched || 0),
+          "show/hide the companies with a Wikidata item for the entity itself or its operator",
+          function (b) { WD.matched = !WD.matched; b.classList.toggle("active", WD.matched); applyFilter(); refreshList(); }));
+        if (ui.wikidata.only) wrow.appendChild(mkBtn(swatch(WD_COLOUR) + "wikidata-only" + nHtml(ui.wikidata.only),
+          "Wikidata items (operator or brand of a map company) with coordinates in the scope but no map entity of their own",
+          function (b) { WD.only = !WD.only; b.classList.toggle("active", WD.only); applyFilter(); refreshList(); }));
+        bar.appendChild(wrow);
       }
     }
 
@@ -380,8 +416,12 @@
       }).join("");
     }
     function first(rec, key) { return Array.isArray(rec[key]) && rec[key].length ? rec[key][0] : null; }
-    function summaryHtml(rec) {   // the preview's hover card, field for field
+    function summaryHtml(rec) {   // the preview's hover card, field for field (+ register / wikidata verdict lines)
       var lines = ["<b>name:</b> " + nameHtml(rec)];
+      if (rec.register_match && rec.register_match !== "n/a") lines.push("<b>register:</b> " + esc(rec.register_match) +
+        (rec.hr_status ? " · " + esc(rec.hr_status) : "") + (rec.hr_name ? " · " + esc(rec.hr_name) : ""));
+      if (rec.wd_id || rec.wd_operator_id) lines.push("<b>wikidata:</b> " + esc(rec.wd_id || "") + (rec.wd_operator_id ? " operator " + esc(rec.wd_operator_id) : "") +
+        (rec.wd_industry ? " · " + esc(rec.wd_industry) : ""));
       if (rec.business_type) lines.push("<b>business_type:</b> " + esc(rec.business_type) + srcTag(rec.business_type_source));
       if (rec.business_subtype) lines.push("<b>business_subtype:</b> " + esc(rec.business_subtype) + srcTag(rec.business_subtype_source));
       var ms = rec.mastr && rec.mastr.filter(function (m) { return m.mastr_wz_abschnitt; })[0];
@@ -411,7 +451,7 @@
       }
       return html;
     }
-    var SOURCE_KEYS = ["osm", "ied", "abwaerme", "mastr", "overture", "register"];
+    var SOURCE_KEYS = ["osm", "ied", "abwaerme", "mastr", "overture"];
     function fieldsHtml(rec, skip) {
       return Object.keys(rec).filter(function (k) {
         return skip.indexOf(k) < 0 && rec[k] !== null && rec[k] !== undefined && rec[k] !== "" && k !== "latitude" && k !== "longitude";
@@ -423,27 +463,29 @@
         return "<div><span class='k'>" + esc(k) + ":</span> " + fmt(rec[k]) + "</div>";
       }).join("");
     }
-    var HR_FIELDS = ["register_match", "hr_name", "hr_matched_name", "hr_status", "hr_dissolved_date", "hr_registration", "hr_court",
-                     "legal_form", "hr_source", "hr_snapshot_date", "register_score", "hr_capital", "hr_objective", "hr_candidates", "hr_id"];
-    var WD_FIELDS = ["wd_id", "wd_operator_id", "wd_brand_id", "wd_website", "wd_industry", "wd_lei", "wd_legal_form", "wd_parent", "wd_inception", "wd_dissolved"];
-    function pickHtml(rec, keys) {
-      var sub = {}; keys.forEach(function (k) { if (rec[k] !== null && rec[k] !== undefined && rec[k] !== "") sub[k] = rec[k]; });
-      return Object.keys(sub).length ? fieldsHtml(sub, []) : "";
-    }
     function cardHtml(rec) {
       var html = "<div class='card'>" + summaryHtml(rec);
-      var hr = rec.register_match && rec.register_match !== "n/a" ? pickHtml(rec, HR_FIELDS) : "";
-      if (hr) html += "<details" + (rec.hr_id ? " open" : "") + "><summary>register — " + esc(rec.register_match) +
-        (rec.hr_status ? " · " + esc(rec.hr_status) : "") + "</summary>" + hr + "</details>";
-      var wd = pickHtml(rec, WD_FIELDS);
-      if (wd) html += "<details><summary>wikidata</summary>" + wd + "</details>";
-      html += "<details><summary>merged record — all fields</summary>" + fieldsHtml(rec, SOURCE_KEYS.concat(["name"], HR_FIELDS, WD_FIELDS)) + "</details>";
+      // the raw register row behind hr_id and the raw Wikidata items behind wd_* (nested in tier 2);
+      // the merged record keeps the derived hr_* / wd_* fields
+      if (Array.isArray(rec.register) && rec.register.length) {
+        html += "<details><summary>register — raw record</summary>" + rec.register.map(function (r) {
+          return "<div class='rec'><span class='k'>" + esc(r.hr_source || "") + " " + esc(r.hr_id || "") + "</span>" + fieldsHtml(r, ["hr_id", "hr_source"]) + "</div>";
+        }).join("") + "</details>";
+      }
+      if (Array.isArray(rec.wikidata) && rec.wikidata.length) {
+        html += "<details><summary>wikidata — raw record" + (rec.wikidata.length > 1 ? "s (" + rec.wikidata.length + ")" : "") + "</summary>" +
+          rec.wikidata.map(function (r) {
+            return "<div class='rec'><span class='k'>" + esc(r.role || "") + " <a class='pv-link' href='https://www.wikidata.org/wiki/" + esc(r.qid || "") +
+              "' target='_blank' rel='noopener'>" + esc(r.qid || "") + "</a></span>" + fieldsHtml(r, ["role", "qid"]) + "</div>";
+          }).join("") + "</details>";
+      }
+      html += "<details><summary>merged record — all fields</summary>" + fieldsHtml(rec, SOURCE_KEYS.concat(["name", "register", "wikidata"])) + "</details>";
       SOURCE_KEYS.forEach(function (k) {
         if (!Array.isArray(rec[k]) || !rec[k].length) return;
         var recs = rec[k].map(function (r, i) {
           return "<div class='rec'><span class='k'>#" + (i + 1) + " " + esc(r.id || "") + "</span>" + fieldsHtml(r, ["id"]) + "</div>";
         }).join("");
-        var title = k === "register" ? "register" : (LBL[k] || k) + " — raw record" + (rec[k].length > 1 ? "s (" + rec[k].length + ")" : "");
+        var title = (LBL[k] || k) + " — raw record" + (rec[k].length > 1 ? "s (" + rec[k].length + ")" : "");
         html += "<details><summary>" + esc(title) + "</summary>" + recs + "</details>";
       });
       return html + "</div>";
@@ -462,8 +504,11 @@
       if (f.properties.id === hoverId) return;
       hoverId = f.properties.id; clearTimeout(hoverTimer);
       var ll = f.geometry.coordinates;
-      hover.setLngLat(ll).setHTML("<div class='card'><b>name:</b> " + esc(f.properties.name || "—") +
-        (f.properties.bt ? "<br><b>business_type:</b> " + esc(f.properties.bt) : "") + "<br><b>source:</b> " + esc(f.properties.src) + "</div>").addTo(map);
+      var quick = "<div class='card'><b>name:</b> " + esc(f.properties.name || "—") +
+        (f.properties.bt ? "<br><b>business_type:</b> " + esc(f.properties.bt) : "") + "<br><b>source:</b> " + esc(f.properties.src) +
+        (f.properties.hr ? "<br><b>register:</b> " + esc(HR_LABELS[f.properties.hr] || f.properties.hr) : "") +
+        (f.properties.wd ? "<br><b>wikidata:</b> " + esc(String(f.properties.wd).split("+").filter(Boolean).map(function (k) { return WD_LABELS[k] || k; }).join(", ")) : "") + "</div>";
+      hover.setLngLat(ll).setHTML(quick).addTo(map);
       hoverTimer = setTimeout(function () {
         getCard(hoverId).then(function (rec) { if (hoverId === rec.id && pinnedId !== rec.id) hover.setHTML("<div class='card'>" + summaryHtml(rec) + "</div>"); });
       }, 220);

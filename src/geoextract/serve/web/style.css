@@ -82,3 +82,5 @@ html, body {margin: 0; height: 100%; font: 12px sans-serif; color: #222; overflo
 #extracts td, #extracts th {border-bottom: 1px solid #eee; padding: 2px 4px; text-align: left}
 #extracts a {color: #1a5fb4}
 .sub {color: #777; font-size: 11px}
+#pv-hint {position: fixed; top: 70px; left: calc(50% - 170px); transform: translateX(-50%); z-index: 900; background: rgba(255,255,255,.95);
+  padding: 8px 14px; border: 1px solid #bbb; border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,.3); font: 13px sans-serif; color: #333; pointer-events: none}

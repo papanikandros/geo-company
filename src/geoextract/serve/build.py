@@ -27,6 +27,7 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -99,7 +100,8 @@ def tippecanoe_available() -> bool:
 TILE_SOURCE_COLS = ["id", "name", "business_type", "source", "source_count", "is_industrial",
                     "state", "district_ags", "website", "nace_section", "ied_activity",
                     "abw_heat_mwh_a", "mastr_techs", "grounds_area_source",
-                    "register_match", "hr_status", "latitude", "longitude"]
+                    "register_match", "hr_status", "wd_id", "wd_operator_id", "wd_brand_id", "website_source",
+                    "latitude", "longitude"]
 
 
 def _point_props(r: dict) -> dict:
@@ -136,7 +138,19 @@ def _point_props(r: dict) -> dict:
     hr = register_class(r.get("register_match"), r.get("hr_status"))
     if hr:
         p["hr"] = hr
+    wd = wikidata_key(r)
+    if wd:
+        p["wd"] = wd
     return p
+
+
+def wikidata_key(r: dict) -> str | None:
+    """Which Wikidata links a row has, as a delimited key for the tile filter:
+    e = the entity itself, o = its operator, b = its brand, w = website filled from Wikidata."""
+    parts = [k for k, col in (("e", "wd_id"), ("o", "wd_operator_id"), ("b", "wd_brand_id")) if r.get(col)]
+    if r.get("website_source") == "wikidata":
+        parts.append("w")
+    return "+" + "+".join(parts) + "+" if parts else None
 
 
 def register_class(match: object, status: object) -> str | None:
@@ -168,7 +182,7 @@ def _iter_points(con: duckdb.DuckDBPyConnection, merged: Path):
             yield float(r["longitude"]), float(r["latitude"]), _point_props(r)
 
 
-PROPS_COLS = ["id", "name", "bt", "src", "sc", "ind", "st", "ags", "web", "nace", "ied", "abw", "mt", "poly", "hr"]
+PROPS_COLS = ["id", "name", "bt", "src", "sc", "ind", "st", "ags", "web", "nace", "ied", "abw", "mt", "poly", "hr", "wd"]
 
 
 def write_props(con: duckdb.DuckDBPyConnection, merged: Path, out: Path) -> int:
@@ -191,14 +205,67 @@ def register_only_parquet(data_root: Path, scope: str) -> Path:
     return data_root / "geoextract" / f"register_only_{scope}_4326.parquet"
 
 
+def wikidata_items_parquet(data_root: Path) -> Path:
+    return data_root / "geoextract" / "src_wikidata" / "wikidata_items.parquet"
+
+
+_COORD_RE = re.compile(r"Point\(\s*(-?[\d.]+)\s+(-?[\d.]+)\s*\)", re.IGNORECASE)
+
+
+def wikidata_only(con: duckdb.DuckDBPyConnection, merged: Path, items: Path) -> pd.DataFrame:
+    """Wikidata items referenced by the scope (operator or brand of a map row) that carry
+    coordinates but are NOT the entity item of any map row: companies Wikidata knows at a
+    place where the map has no entity of their own. Columns: qid, label, role, lon, lat,
+    website, industry."""
+    have = set(_columns(con, merged))
+    if not items.exists() or "wd_id" not in have:
+        return pd.DataFrame(columns=["qid", "label", "role", "lon", "lat", "website", "industry"])
+    ids = con.execute(f"""
+        SELECT list(DISTINCT wd_id) FILTER (wd_id IS NOT NULL),
+               list(DISTINCT wd_operator_id) FILTER (wd_operator_id IS NOT NULL),
+               list(DISTINCT wd_brand_id) FILTER (wd_brand_id IS NOT NULL)
+        FROM read_parquet('{merged}')""").fetchone()
+    ent, ops, brands = (set(x or []) for x in ids)
+    it = pd.read_parquet(items, columns=["qid", "label", "coord", "website", "industry"])
+    it = it[it["coord"].notna() & ~it["qid"].isin(ent) & it["qid"].isin(ops | brands)]
+    # only inside the scope: the map's own extent (percentile bbox, outliers ignored) + 2 km
+    x0, y0, x1, y1 = con.execute(f"""
+        SELECT quantile_cont(longitude, 0.005) - 0.03, quantile_cont(latitude, 0.005) - 0.02,
+               quantile_cont(longitude, 0.995) + 0.03, quantile_cont(latitude, 0.995) + 0.02
+        FROM read_parquet('{merged}')""").fetchone()
+    rows = []
+    for r in it.itertuples(index=False):
+        m = _COORD_RE.match(str(r.coord))
+        if not m:
+            continue
+        lon, lat = float(m.group(1)), float(m.group(2))
+        if not (x0 <= lon <= x1 and y0 <= lat <= y1):
+            continue
+        rows.append({"qid": r.qid, "label": r.label, "role": "operator" if r.qid in ops else "brand",
+                     "lon": lon, "lat": lat,
+                     "website": r.website if isinstance(r.website, str) else None,
+                     "industry": r.industry if isinstance(r.industry, str) else None})
+    return pd.DataFrame(rows, columns=["qid", "label", "role", "lon", "lat", "website", "industry"]).astype(
+        {"website": "object", "industry": "object"})
+
+
 def _write_tile_features(con: duckdb.DuckDBPyConnection, merged: Path, sites: Path | None,
-                         landuse: list[Path], out: Path, register_only: Path | None = None) -> dict[str, int]:
+                         landuse: list[Path], out: Path, register_only: Path | None = None,
+                         wd_only: pd.DataFrame | None = None) -> dict[str, int]:
     """GeoJSON text sequence (one feature per line) with per-feature tippecanoe layer/zoom.
     Points come from the MERGED table (internal debug columns feed the display groups);
     the tiles are a rendering product, not a download."""
-    counts = {"points": 0, "sites": 0, "landuse": 0, "register": 0}
+    counts = {"points": 0, "sites": 0, "landuse": 0, "register": 0, "wikidata": 0}
     bt_of: dict[str, str] = {}
     with open(out, "w", encoding="utf8") as fh:
+        if wd_only is not None and len(wd_only):   # item 6c wikidata-only companies
+            for r in wd_only.to_dict("records"):
+                props = {k: v for k, v in (("id", r["qid"]), ("name", r["label"]), ("role", r["role"]),
+                                           ("web", r["website"]), ("ind", r["industry"])) if isinstance(v, str) and v}
+                feat = {"type": "Feature", "tippecanoe": {"layer": "wikidata", "minzoom": config.SERVE_TILE_MINZOOM},
+                        "geometry": {"type": "Point", "coordinates": [r["lon"], r["lat"]]}, "properties": props}
+                fh.write(json.dumps(feat, ensure_ascii=False, separators=(",", ":"), default=str) + "\n")
+                counts["wikidata"] += 1
         if register_only is not None and register_only.exists():   # stage 4 register-only companies
             ro = gpd.read_parquet(register_only)
             ro = ro[ro.geometry.notna() & (ro["status"] == "active")]
@@ -312,9 +379,26 @@ def build_ui_model(con: duckdb.DuckDBPyConnection, merged: Path, version: str,
         ro = pd.read_parquet(ro_path, columns=["status", "hr_industrial", "hr_geocode_method"])
         ro = ro[(ro["status"] == "active") & (ro["hr_geocode_method"] != "none")]
         register_only = {"industrial": int(ro["hr_industrial"].sum()), "other": int((~ro["hr_industrial"]).sum())}
+    if "wd_id" in df.columns and data_root is not None:
+        wd_only_n = len(wikidata_only(con, merged, wikidata_items_parquet(data_root)))
+    else:
+        wd_only_n = 0
     if "register_match" in df.columns:
         cls = pd.Series([register_class(m, st) for m, st in zip(df["register_match"], df["hr_status"])])
         register = {str(k): int(v) for k, v in cls.dropna().value_counts().items()}
+        register["matched"] = register.get("matched_active", 0) + register.get("matched_dissolved", 0)
+        register["only"] = sum(register_only.values()) if register_only else 0
+    wikidata = None
+    if "wd_id" in df.columns:
+        recs = df[["wd_id", "wd_operator_id", "wd_brand_id", "website_source"]].to_dict("records")
+        keys = pd.Series([wikidata_key({k: (None if pd.isna(v) else v) for k, v in r.items()}) for r in recs]).dropna()
+        wikidata = {name: int(keys.str.contains(f"+{k}+", regex=False).sum())
+                    for k, name in (("e", "entity"), ("o", "operator"), ("b", "brand"), ("w", "website"))}
+        wikidata = {k: v for k, v in wikidata.items() if v}
+        # "matched" = rows validated by an item of the entity itself or of its operator (a row
+        # may carry both; the brand item alone says nothing about the site, so it does not count)
+        wikidata["matched"] = int((keys.str.contains("+e+", regex=False) | keys.str.contains("+o+", regex=False)).sum())
+        wikidata["only"] = wd_only_n
     sectors = sorted(cat[cat != "∅"].unique().tolist())
     palette = {c: groups.PALETTE[i % len(groups.PALETTE)] for i, c in enumerate(sorted(cat.unique()))}
     # scope bbox from the STATE bboxes (a few rows carry far-away coordinates — geocoded
@@ -327,7 +411,7 @@ def build_ui_model(con: duckdb.DuckDBPyConnection, merged: Path, version: str,
                 float(df["longitude"].max()), float(df["latitude"].max())]
     return {"version": version, "companies": len(df), "bbox": bbox,
             "tile_minzoom": config.SERVE_TILE_MINZOOM, "tile_maxzoom": config.SERVE_TILE_MAXZOOM,
-            "datasets": ds, "register": register, "register_only": register_only,
+            "datasets": ds, "register": register, "register_only": register_only, "wikidata": wikidata,
             "labels": groups.DS_LABELS, "grp_order": groups.GRP_ORDER,
             "palette": palette, "match_colours": groups.MATCH_COLOURS,
             "ied_labels": groups.IED_ACTIVITY_LABELS,
@@ -410,6 +494,46 @@ def build(data_root: Path, scope: str, version: str | None = None, tiles: bool =
         counts[key] = con.execute(f"SELECT count(*) FROM nest_{key}").fetchone()[0]
         joins.append(f"LEFT JOIN nest_{key} ON nest_{key}.company_id = f.id")
         nested_cols.append(f"nest_{key}.{_q(key)}")
+    # the register row behind hr_id (stage 2) and the Wikidata items behind wd_* (item 6c):
+    # raw records of those two sources, nested like the adapter records above
+    reg_files = [p for p in (data_root / "geoextract" / "register").glob("hr_companies_*.parquet")] \
+        if data_root is not None else []
+    if reg_files and {"hr_id", "hr_source"} <= set(cols):
+        reg_cols = [c for c in _columns(con, reg_files[0])
+                    if c not in {"name_key_full", "name_key_light", "street_key"}]
+        file_list = ", ".join(f"'{f}'" for f in reg_files)
+        con.execute(f"""
+            CREATE TABLE nest_register AS
+            SELECT f.id AS company_id, list(r) AS register
+            FROM read_parquet('{flat}') f
+            JOIN (SELECT {', '.join(_q(c) for c in reg_cols)} FROM read_parquet([{file_list}], union_by_name = true)) r
+              ON r.hr_id = f.hr_id AND r.hr_source = f.hr_source
+            GROUP BY f.id""")
+        counts["register"] = con.execute("SELECT count(*) FROM nest_register").fetchone()[0]
+        joins.append("LEFT JOIN nest_register ON nest_register.company_id = f.id")
+        nested_cols.append("nest_register.register")
+    wd_items = wikidata_items_parquet(data_root) if data_root is not None else None
+    if wd_items is not None and wd_items.exists() and "wd_id" in cols:
+        con.execute(f"""
+            CREATE TABLE nest_wikidata AS
+            WITH links AS (
+              SELECT id AS company_id, wd_id AS qid, 'entity' AS role FROM read_parquet('{merged}') WHERE wd_id IS NOT NULL
+              UNION ALL
+              SELECT id, wd_operator_id, 'operator' FROM read_parquet('{merged}') WHERE wd_operator_id IS NOT NULL
+              UNION ALL
+              SELECT id, wd_brand_id, 'brand' FROM read_parquet('{merged}') WHERE wd_brand_id IS NOT NULL)
+            SELECT l.company_id,
+                   list(struct_pack(role := l.role, qid := i.qid, label := i.label, website := i.website,
+                                    industry := i.industry, lei := i.lei, legal_form := i.legal_form,
+                                    parent := i.parent, parent_id := i.parent_id, inception := i.inception,
+                                    dissolved := i.dissolved, coord := i.coord, hq := i.hq,
+                                    opencorporates := i.opencorporates, fetched_at := i.fetched_at)
+                        ORDER BY CASE l.role WHEN 'entity' THEN 0 WHEN 'operator' THEN 1 ELSE 2 END) AS wikidata
+            FROM links l JOIN read_parquet('{wd_items}') i ON i.qid = l.qid
+            GROUP BY l.company_id""")
+        counts["wikidata"] = con.execute("SELECT count(*) FROM nest_wikidata").fetchone()[0]
+        joins.append("LEFT JOIN nest_wikidata ON nest_wikidata.company_id = f.id")
+        nested_cols.append("nest_wikidata.wikidata")
     full = out / "companies_full.parquet"
     con.execute(f"""
         COPY (SELECT f.*{', ' + ', '.join(nested_cols) if nested_cols else ''}
@@ -480,7 +604,8 @@ def build(data_root: Path, scope: str, version: str | None = None, tiles: bool =
                        if st in name_to_slug and paths.landuse_parquet(data_root, name_to_slug[st]).exists()]
             features = out / "features.geojsonl"
             tile_counts = _write_tile_features(con, merged, sites, landuse, features,
-                                               register_only_parquet(data_root, scope))
+                                               register_only_parquet(data_root, scope),
+                                               wikidata_only(con, merged, wikidata_items_parquet(data_root)))
             build_tiles(features, pmtiles)
             features.unlink()
             print(f"[serve] tiles: {tile_counts} → {pmtiles.name} "
@@ -508,7 +633,7 @@ def build(data_root: Path, scope: str, version: str | None = None, tiles: bool =
         "nested_sources": {k: int(v) for k, v in counts.items()},
         "tiles": tile_counts or None,
         "columns_flat": pub,
-        "columns_full": pub + [k for k in SOURCE_KEYS if k in counts],
+        "columns_full": pub + [k for k in SOURCE_KEYS + ["register", "wikidata"] if k in counts],
         "excluded": sorted(config.SERVE_PUBLIC_DROP),
         "licence": {"note": config.LICENCE_NOTE, "attribution": config.ATTRIBUTION,
                     "register": config.REGISTER_ATTRIBUTION},
