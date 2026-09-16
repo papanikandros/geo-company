@@ -547,10 +547,7 @@ CONFIDENCE_WEIGHTS = {
 INDUSTRIAL_SOURCES = {"ied", "abwaerme", "mastr"}
 INDUSTRIAL_TAGS: dict[str, set[str]] = {
     "landuse": {"industrial", "quarry", "port", "depot", "railway", "landfill"},
-    "man_made": {
-        "works", "kiln", "chimney", "gasometer", "silo", "storage_tank", "pipeline",
-        "petroleum_well", "mineshaft", "wastewater_plant", "water_works", "pumping_station",
-    },
+    "man_made": {"works", "kiln", "wastewater_plant", "water_works"},   # production / utility plants
     "industrial": {"factory", "oil", "mine", "warehouse", "port", "scrap_yard",
                    "slaughterhouse", "depot"},
     "power": {"plant"},
@@ -560,8 +557,13 @@ INDUSTRIAL_TAGS: dict[str, set[str]] = {
 # anonymous rooftop panels (power=generator, 277 k solar) and street cabinets
 # (power=substation minor_distribution) are infrastructure objects, not companies. A
 # register merge (INDUSTRIAL_SOURCES) makes the row industrial regardless.
+# Structures (tanks, silos, pipelines, chimneys, shafts, wells, pumping stations) joined
+# the named-only group on 2026-09-16: an anonymous tank is an object on somebody's site,
+# a named one ("Getreidesilo Hansa", "Pumpwerk Seehausen") is a site worth keeping.
 INDUSTRIAL_TAGS_NAMED_ONLY: dict[str, set[str]] = {
     "power": {"generator", "substation"},
+    "man_made": {"storage_tank", "silo", "pipeline", "chimney", "gasometer", "mineshaft",
+                 "petroleum_well", "pumping_station"},
 }
 INDUSTRIAL_NACE_SECTIONS = {"B", "C", "D", "E", "F"}
 

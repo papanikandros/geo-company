@@ -161,7 +161,12 @@ needs its own go with the volume stated first (golden rule 3).
       every cache load. `business_type=industrial` 30 418 → 94 050.
    c. Root `geographic_entities` dropped in the adapter (19 307 rows).
    DE table 4 164 518 → **4 145 466** companies; `is_industrial` 700 932 → **370 050**
-   (105 627 register-backed). `man_made` structures (155 k) knowingly kept for now.
+   (105 627 register-backed). **2026-09-16 (user decision):** the structure tags
+   (storage_tank, silo, pipeline, chimney, gasometer, mineshaft, petroleum_well,
+   pumping_station) moved to `INDUSTRIAL_TAGS_NAMED_ONLY` — an anonymous tank is an object,
+   a named one stays; works / plant / utility plants / crafts / `industrial=` unchanged.
+   DE `is_industrial` 366 592 → **256 879** (228 615 named), Bremen 2 050 → 1 627; flag
+   re-applied on the existing merged tables (offline), no re-extract.
 5. **Entity-resolution normalization pass — DONE 2026-09-04** (spec §A3 amended):
    token-based legal-form stripping incl. dotted spellings (46 961 `G.m.b.H.`-style names were
    missed before), title/connector noise, full+light key ensemble scoring (max), and
@@ -222,28 +227,91 @@ needs its own go with the volume stated first (golden rule 3).
    `research/website-discovery/report.md` (F1 ceiling ≈ 0.82; municipality not PLZ in
    queries; Impressum = exact linkage; Kriesch 2024 Common-Crawl route). Network-heavy stages
    run on an unmetered machine. Bremen first at every stage; nothing starts without a go.
-7. **Share the data state with colleagues (user idea 2026-09-07) — so they can run the NACE
-   classification themselves.** Proposal (Claude's take, awaiting decision):
-   - **Ship GeoParquet, not a Postgres dump.** The merged table is already the exchange
-     format (spec §1, EPSG:4326, ~690 MB for 4.14 M rows). Anyone reads it in seconds with
-     pandas/geopandas/DuckDB, no server. A Postgres/PostGIS dump would be several GB of
-     text, needs a server install per colleague and buys nothing for classification work;
-     keep it as an option only if someone needs concurrent multi-user writes.
-   - **SQL for those who want it: one DuckDB file** (`geoextract db build` → single
-     `.duckdb` with the spatial extension, ~1 GB, portable) or plain
-     `SELECT … FROM 'companies_merged_DE_4326.parquet'` in DuckDB — zero setup.
-   - **Distribution outside git**: `data/` stays gitignored (GitHub caps files at 100 MB).
-     Publish the parquet + summary JSON + a checksum manifest as a **GitHub Release asset**
-     (2 GB/file, free) or on the shared drive; add `scripts/fetch_data.py` (or `geoextract
-     data pull`) that downloads and verifies them. Upload volume ≈ 0.7 GB from the metered
-     connection — needs a go.
-   - **Contribution path back**: colleagues do NOT regenerate the table; they deliver a
-     small labels file (`nace_labels_<who>.parquet`: id, nace_codes, nace_primary,
-     nace_confidence, nace_method, nace_reasoning) that C6 writeback ingests. Define that
-     file contract first (it is the §3 nace_* columns keyed by `id`).
-   - README quickstart (install, pull data, open in DuckDB/QGIS, label file format) and
-     the licence block (ODbL derivative database — attribution required; CDLA/DL-DE notes
-     from `config.ATTRIBUTION`).
+   **Stage 0 DONE 2026-09-07 (user go):** downloads 2019 dump (260 MB) + GLEIF (479 MB)
+   single-pass via `scripts/fetch_resumable.sh`; `geoextract register build` → hr2022
+   2 191 815 / hr2019 5 305 727 / gleif 255 303 companies in `data/geoextract/register/`
+   (+ hr_names tables with previous names); `geoextract web hygiene` on Bremen + DE: DE
+   `website` 2 475 587 own/chain sites, 152 823 listings → `website_listing`, 14 145
+   propagated; hygiene also runs inside `extract` before confidence. Details + calibration
+   notes in the plan's Status section. Next: stage 1 (Impressum) on Bremen — needs a go and
+   an unmetered machine for anything beyond a Bremen-sized fetch.
+   **Stages 2b + 4 + 6c + 3b + 5 DONE on Bremen 2026-09-09 (user go):** `geoextract register
+   match` (5 249 of 35 359 named rows matched, 654 of 2 050 industrial, 35 ambiguous; idf
+   rarity rule for 80–89), `register reconcile` (54 124 register firms in Bremen postcodes,
+   32 036 active register-only, 877 industrial-active gap; offline OSM address geocode),
+   `wikidata enrich` (537 items, 0.4 MB, 51 websites filled), `web discover` (385 industrial
+   rows → 25 verified sites, 6.5 %); map (2026-09-10): "Register" and "Wikidata" data-layer rows,
+   same OR logic as the source rows (2026-09-15): ⏻ + "matched" (adds the register-matched /
+   Wikidata-linked map companies) + "-only" (register companies / Wikidata items with no map
+   entity, own tile layers); card: "register — raw
+   record" + "wikidata — raw record" (nested in tier 2), hr_*/wd_* stay in the merged record; spec
+   §3.3 + §B6 amended; report `data/geoextract/eval/register_website_bremen.md`.
+   **Stage 1 Impressum DONE on Bremen industrial 2026-09-15 (unmetered line):** `geoextract
+   web impressum` (`web/impressum.py`, own Python extractor, cache with imprint text,
+   `--reextract` without network): 923 hosts / 4.4 min, imprint on 565 (87 % of reachable),
+   register number 70 %, legal name 94 %, verdicts name+plz 378 / name 196 / mismatch 111,
+   `legal_name` (new contract column) filled 538, `legal_form` 398. **Stage 2a exact join DONE
+   2026-09-15:** `exact_frame`/`merge_exact` in `register/match.py` (number + court, name-agreement
+   guard against general-partner / parent numbers, strong name join kept over a differing
+   imprint owner): 294 rows `exact_hrb` (110 new), industrial matched 654 → 764 of 2 050,
+   `legal_name` 5 489 (imprint first, else register). **Stage 3c DONE 2026-09-15:** Common
+   Crawl domain vertices (893 MB, `data/raw/commoncrawl/`) → 5.02 M `.de` domains index
+   (`web/ccindex.py`, `geoextract web ccindex build|match`), strict acceptance for discovered
+   sites; Bremen industrial residual 908 → 27 verified sites (3.0 %); industrial register-matched 770 of 2 050.
+   **Stage 3d DONE on Bremen 2026-09-15:** SearXNG (compose profile `search`, Yahoo is the only
+   free engine that answers; `GEOEXTRACT_SEARX_ENGINES=yahoo`), `geoextract web search
+   train|run` (`web/search.py`, scikit-learn ranker trained on the verified companies, cv
+   top-1 0.94): residual 881 → 104 verified sites (12.3 %, ≈ 0.90 precision by hand; unquoted
+   queries, 1 query/s — 4/s got the address blocked by Yahoo after ≈ 1 500 queries);
+   industrial verified own site 705, register-matched 791 of 2 050 (`exact_hrb` 356). Open:
+   100-firm no-site sample. Next: the DE runs in
+   pipeline order (1 → 2 → Wikidata → 4 → 3b → 3c → 3d).
+   **6c Wikidata enrichment (user decision 2026-09-08, after the register join, plan §"item
+   6c"):** the table already carries Q-ids (OSM wikidata 10 631 / operator:wikidata 37 809 /
+   brand:wikidata 136 037 rows, Overture brands 33 438); fetch the ~45 k items (CC0, tens of
+   MB, needs a go) for website, industry, LEI → GLEIF join, legal form, parent; write back
+   with `wd_*` provenance; optional coordinate layer via SPARQL for validation.
+7. **Serve the merged table: public map + API (user decisions 2026-09-07) — replaces the
+   "share the data state" item.** Plan: `serve-plan.md` (authoritative). Decisions: public
+   access; deploy on BOTH a small VPS (Hetzner-class, also the future unmetered worker) and
+   the institute server, plus locally; colleague browses + downloads, calls the API from
+   Python/R, returns NACE labels; manual data update after milestones (0.7 GB upload each).
+   Design: `geoextract serve build` → public parquet subset (sorted by state/district) +
+   PMTiles (tippecanoe on the server, three layers: points / site polygons / landuse) +
+   precomputed state × sector extracts (PARQUET only, no polygons — 373 MB DE-wide vs CSV 2.1 GB /
+   GeoJSON 5 GB; polygons in a separate sites.parquet + the tiles; CSV/GeoJSON only on demand
+   via the API) — two tiers per extract: `_flat` (contract minus email + hygiene) and `_full`
+   (+ one NESTED `LIST<STRUCT>` column per source with the raw adapter records; flattened
+   `abw_*`/`ovt_*`/`mastr_*` debug columns stay internal, never in downloads) + search index
+   + manifest;
+   MapLibre GL frontend with feature parity to `scripts/preview_layer.py` + state/district/
+   sector filters + draw-and-download; FastAPI + DuckDB API (`/v1/companies` with
+   state/district/sector/bbox + formats, polygon query, `/v1/companies/{id}`, search,
+   summary, token-protected `/v1/labels` upload = the nace_* contract keyed by id); one
+   docker compose (caddy + api + builder), Cloudflare free tier in front. Public data =
+   contract minus `email`. Sector filter = business_type / is_industrial now,
+   `nace_section` when Part C lands. Stages S1–S7 in the plan; nothing starts without a go.
+   **S1 DONE 2026-09-07 (except tiles):** `geoextract serve build --scope bremen` → 30 MB in
+   `data/serve/bremen/2026-09-04/` (flat + nested full parquet, sites, 36 extracts, search,
+   manifest). **Tiles + S2 DONE 2026-09-08:** tippecanoe installed → `companies.pmtiles`
+   17 MB (points/sites/landuse, z4–14, display-group props from the merged table) + `ui.json`;
+   MapLibre page `serve/web/` + stdlib dev server `geoextract serve dev --scope bremen
+   --port 8791` (Range requests, card + search endpoints). Verified in Chrome: toggles,
+   counts, search → card with nested raw source records, downloads. **S3 DONE 2026-09-08:**
+   `serve/api.py` (FastAPI + DuckDB, extra `serve`): `geoextract serve api --scope bremen
+   --port 8791` — filters (state/district/sector/industrial/bbox), tiers flat|full, formats
+   json|geojson|csv|parquet, polygon POST, card via in-memory id index, search, summary,
+   extracts, `/docs`; map page gained "select area" + "this view" downloads. Bremen: filters
+   < 70 ms, polygon → nested parquet 0.8 s. Frontend refactored to preview parity 2026-09-08
+   (right Companies panel, Box/Lasso/Clear/Reset/Image, preview point styling, server-side
+   selections via `display=` over props.parquet, Esc closes everything, layers start off,
+   collapsible toolbar, in-view counter). **S4 files DONE 2026-09-08** (labels contract
+   left out by user decision): Dockerfile, docker-compose.yml (api + caddy + builder
+   profile), Caddyfile, scripts/serve_push.sh, README rewrite, `current` symlink.
+   **Built + verified 2026-09-09:** `geoextract:runtime` (2.5 min, ≈ 200 MB pulls; legacy
+   builder → runtime stage first in the Dockerfile), stack up on :80 with Caddy serving
+   /data (Range, cache) and proxying the API; the only local service now
+   (`SCOPE=bremen docker compose up -d`). Next: S5 VPS (account + domain + 0.7 GB upload go).
 8. **Part C NACE classification — refactored against the 2026-08-30 research** before
    any classify code is written: read INSEE GRAAL / codif-ape-train (adapt vs
    reimplement), Kühnemann 2020 + Beuter 2025; crawl4ai + ARGUS practices for fetching;
@@ -254,7 +322,22 @@ needs its own go with the volume stated first (golden rule 3).
    - **Target revision: always the LATEST — WZ 2025 / NACE Rev. 2.1** (user decision
      2026-09-03; the spec's "NACE Rev. 2 / WZ 2008" wording is superseded — amend spec §0/§3
      descriptions additively, no column renames). Older sources map forward via the
-     Destatis 2008 → 2025 Umsteigeschlüssel (xlsx, ~176 KB, download needs go).
+     Destatis 2008 → 2025 Umsteigeschlüssel — **DOWNLOADED 2026-09-08 (user go, 76 KB):**
+     `data/raw/wz2025/umsteigeschluessel-wz2008-wz2025.xlsx` (+ .sha256, .meta.json; sheet
+     "WZ-2008 - WZ-2025": 2008 code/title → 2025 code/title with "ex" partial markers).
+   - **Research DONE 2026-09-07** (`research/nace-classification/report.md`, 32 papers + 31 repos
+     + 12 datasets): Destatis benchmark on 1.6 M German texts = acc 0.78 at WZ-2 / 0.64 at WZ-5
+     (TF-IDF + logreg; top-10 0.98); evidence beats algorithm (name + description strongest,
+     imagery/OSM worse than text; LLM re-ranking of fine shortlists LOST to logreg); hierarchy
+     worth 1–2 pp; ship top-k + confidence, section letter reliable, 4-digit = ranked
+     suggestion. NO open German company→WZ dataset exists → labels = MaStR WZ (crosswalk
+     first), IED, Destatis 34 528-entry keyword list; transfer corpora Belgian KBO (NACE 2.1),
+     Swiss Zefix/NOGA (German names), Sirene (dual-coded). WZ 2008→2025 (839→983) destroys
+     training labels: >70 % N:M links, evaluate on real Unternehmensgegenstand text only
+     (synthetic 93 % → real 33 %). Bases: InseeFrLab/torchTextClassifiers (MIT, text +
+     categorical tags), ONS classifAI + two-tier lookup-then-RAG, AIML4OS WP10 Cluster 5
+     vector store (MIT), codif-ape-nace-revision blueprint; C4 = constrained-candidate RAG
+     only on the residual. Evaluation on a hand-labelled real-text sample before writeback.
 9. **E1** tests / README / CI; then validation layers (sEEnergies/Hotmaps, Overture
    overlap stats, density QA) as time allows.
 10. **Later: deployment of the merged table to Cloudflare KV** (user idea 2026-09-04) — serve
