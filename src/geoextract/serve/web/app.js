@@ -36,7 +36,7 @@
     var LU = ui.lu_colours, UNIT_OF = ui.unit_of || {}, IED_LABELS = ui.ied_labels || {};
     var COLOR_COL = ui.sector_column === "nace_section" ? "nace_section" : "business_type";
     var SRC_SHORT = LBL;
-    $("pv-color-col").textContent = COLOR_COL + " — " + manifest.scope + " (full data, version " + manifest.version + ")";
+    $("pv-color-col").textContent = "data layers — " + manifest.scope + " (full data, version " + manifest.version + ")";
 
     // ---- filters box (served-map additions) -----------------------------------------------
     ui.states.forEach(function (s) {

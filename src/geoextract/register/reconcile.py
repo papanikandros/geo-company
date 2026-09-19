@@ -128,6 +128,24 @@ def reconcile(data_root: Path, scope: str, slugs: list[str]) -> tuple[Path, Path
 
     geom = [Point(x, y) if not np.isnan(x) else None for x, y in zip(only["longitude"], only["latitude"])]
     gdf = gpd.GeoDataFrame(only.drop(columns=["_pri", "_act"]), geometry=geom, crs=config.CRS_STORAGE)
+    # the address index comes from the state PBF, which is a rectangle around the state:
+    # a register company geocoded onto a neighbouring town is not in scope
+    import shapely
+    from .. import paths as _paths
+    polys = [gpd.read_parquet(_paths.boundaries_parquet(data_root, s)).union_all()
+             for s in slugs if _paths.boundaries_parquet(data_root, s).exists()]
+    if polys:
+        area = polys[0] if len(polys) == 1 else shapely.union_all(polys)
+        placed = gdf.geometry.notna().to_numpy()
+        inside = np.zeros(len(gdf), dtype=bool)
+        inside[placed] = shapely.contains_xy(area, gdf.loc[placed, "longitude"].to_numpy(),
+                                             gdf.loc[placed, "latitude"].to_numpy())
+        drop = placed & ~inside
+        if drop.any():
+            print(f"[reconcile] {int(drop.sum())} geocoded register companies outside the scope boundary → unplaced")
+            gdf.loc[drop, "geometry"] = None
+            gdf.loc[drop, ["longitude", "latitude"]] = np.nan
+            gdf.loc[drop, "hr_geocode_method"] = "outside_scope"
     out_p = data_root / "geoextract" / f"register_only_{scope}_4326.parquet"
     gdf.to_parquet(out_p)
 

@@ -6,6 +6,7 @@ import json
 import time
 
 import geopandas as gpd
+import shapely
 import pandas as pd
 
 from . import area, boundaries, config, download, export, paths, resolve
@@ -166,16 +167,25 @@ def run_extract(states: str, sources: str, data_dir=None, skip_download: bool = 
         if scope != "DE":
             # region-derived state covers Foursquare/Microsoft rows; Meta rows have
             # none yet — fall back to the requested states' boundary bounding boxes
+            # region-derived state covers Foursquare/Microsoft rows; Meta rows have none —
+            # test those against the boundary POLYGON. The bounding box used before pulled
+            # the whole rectangle around a state in (Bremen: 7 002 places from Delmenhorst,
+            # Ganderkesee, Stuhr … — the "square" on the map).
             wanted = {config.SLUG_STATE_NAMES[s] for s in slugs}
             in_state = ovt["state"].isin(wanted)
-            in_bbox = pd.Series(False, index=ovt.index)
-            for slug in slugs:
-                b_path = paths.boundaries_parquet(data_root, slug)
-                if b_path.exists():
-                    x0, y0, x1, y1 = gpd.read_parquet(b_path).total_bounds
-                    in_bbox |= (ovt["longitude"].between(x0, x1)
-                                & ovt["latitude"].between(y0, y1))
-            ovt = ovt[in_state | (ovt["state"].isna() & in_bbox)].reset_index(drop=True)
+            in_poly = pd.Series(False, index=ovt.index)
+            unknown = ovt["state"].isna()
+            if unknown.any():
+                for slug in slugs:
+                    b_path = paths.boundaries_parquet(data_root, slug)
+                    if not b_path.exists():
+                        continue
+                    geom = gpd.read_parquet(b_path).union_all()
+                    idx = ovt.index[unknown & ~in_poly]
+                    hit = shapely.contains_xy(geom, ovt.loc[idx, "longitude"].to_numpy(),
+                                              ovt.loc[idx, "latitude"].to_numpy())
+                    in_poly.loc[idx] = hit
+            ovt = ovt[in_state | (unknown & in_poly)].reset_index(drop=True)
             print(f"[overture] state subset {sorted(wanted)}: {len(ovt)} places")
         if len(ovt):
             frames.append(ovt)
@@ -206,6 +216,15 @@ def run_extract(states: str, sources: str, data_dir=None, skip_download: bool = 
     zones_all = gpd.GeoDataFrame(
         pd.concat(zones_parts, ignore_index=True), crs=config.CRS_STORAGE)
     merged = apply_geography(merged, bounds_all, zones_all)
+    if scope != "DE":
+        # the state extracts are rectangles around a state (Geofabrik) and a few sources
+        # carry no state of their own: keep only what the geography stage placed inside
+        wanted = {config.SLUG_STATE_NAMES[s] for s in slugs}
+        keep = merged["state"].isin(wanted)
+        if not keep.all():
+            print(f"[scope] {int((~keep).sum())} rows outside {sorted(wanted)} dropped "
+                  f"({merged.loc[~keep, 'source'].str.split('+').explode().value_counts().head(3).to_dict()})")
+            merged = merged[keep].reset_index(drop=True)
     merged = apply_intrinsic_industrial(merged)
     runtimes["geography"] = time.time() - t0
 
