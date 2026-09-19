@@ -44,3 +44,13 @@ def test_skip_reason():
     assert search.skip_reason(None, places) == "no name"
     assert search.skip_reason("Nabertherm", places) is None
     assert search.skip_reason("Schwarzwaldmilch GmbH", places) is None
+
+
+def test_relevant_filters_soft_block_answers():
+    junk = [{"url": "https://currenttime.now/", "title": "Current time", "content": "clock"},
+            {"url": "https://www.cambridge.org/", "title": "Cambridge University Press", "content": ""}]
+    good = [{"url": "https://www.mafo-systemtechnik.de/", "title": "MAFO Systemtechnik AG", "content": "Teisendorf"}]
+    assert not search.relevant("MAFO Systemtechnik AG Teisendorf", junk)
+    assert search.relevant("MAFO Systemtechnik AG Teisendorf", good)
+    assert search.relevant("MAFO Systemtechnik AG Teisendorf", [])            # honest empty answer
+    assert search.relevant("GmbH impressum", junk)                            # no distinctive token: cannot judge

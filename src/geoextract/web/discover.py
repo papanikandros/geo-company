@@ -171,52 +171,50 @@ def discover(data_root: Path, scope: str, industrial_only: bool = True, limit: i
     print(f"[discover] DNS: {len(todo)} lookups, {sum(dns.values())} resolve ({time.time() - t0:.0f} s)")
     if dry_run:
         return rows
-    session = requests.Session()
-    session.headers.update({"User-Agent": config.WIKIDATA_USER_AGENT.replace("wikidata", "web")})
-    # verification: one host at a time per company (first resolving candidate that verifies)
-    new_rows = []
-    verified: dict[str, dict] = {r["host"]: r for _, r in cache.iterrows()}
-    for h, ok in dns.items():
-        verified[h] = {"host": h, "resolves": bool(ok), "verified": None, "final_host": None}
-    jobs, seen_hosts = [], set()
-    for i, hs in cand.items():
-        for h in hs:
-            v = verified.get(h)
-            if v and v["resolves"] and v.get("verified") in (None, pd.NA) and h not in seen_hosts:
-                seen_hosts.add(h)          # one fetch per host; the first company that guessed it is checked
-                jobs.append((i, h))
-    print(f"[discover] verifying {len(jobs)} resolving hosts with one page fetch each")
-    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-        results = list(ex.map(lambda ih: verify(session, ih[1], rows.at[ih[0], "name"],
-                                                rows.at[ih[0], "address_postcode"], rows.at[ih[0], "address_city"]), jobs))
-    for (i, h), res in zip(jobs, results):
-        verified[h].update(res)
-        verified[h]["checked_at"] = time.strftime("%Y-%m-%d")
-    for h in set(dns) | {h for _, h in jobs}:
-        v = verified[h]
-        new_rows.append({"host": h, "resolves": bool(v.get("resolves")), "verified": v.get("verified"),
-                         "final_host": v.get("final_host"), "checked_at": v.get("checked_at") or time.strftime("%Y-%m-%d")})
-    cache = pd.concat([cache, pd.DataFrame(new_rows)], ignore_index=True).drop_duplicates("host", keep="last")
-    cache.to_parquet(cache_p, index=False)
-    # write back: best verified candidate per row (name+plz beats name)
+    # verification through the imprint stage (shared host cache, process pool) and the
+    # acceptance rule of the discovery routes — one fetch per resolving host, the row
+    # keeps its unverified old site when nothing better is found
+    from . import ccindex, impressum
+    impressum.ensure_columns(gdf)
+    prev = gdf["website_source"] == "guess"                # idempotent: an earlier run is redone
+    if prev.any():
+        for c in ["website", "website_host", "website_kind", "website_source", "website_verified", "website_verified_at",
+                  "legal_name", "website_replaced", "website_replaced_source"] + impressum.EXTRA_COLUMNS:
+            gdf.loc[prev, c] = pd.NA
+    resolving = {h for h, ok in dns.items() if ok} | set(cache[cache["resolves"].fillna(False).astype(bool)]["host"])
+    new_rows = [{"host": h, "resolves": bool(ok), "verified": None, "final_host": None, "checked_at": time.strftime("%Y-%m-%d")}
+                for h, ok in dns.items()]
+    if new_rows:
+        cache = pd.concat([cache, pd.DataFrame(new_rows)], ignore_index=True).drop_duplicates("host", keep="last")
+        cache.to_parquet(cache_p, index=False)
+    hosts = sorted({h for hs in cand.values() for h in hs if h in resolving})
+    print(f"[discover] verifying {len(hosts)} resolving hosts through the imprint stage")
+    recs = impressum.fetch_hosts(data_root, hosts, workers=workers, tag="discover")
+    today = time.strftime("%Y-%m-%d")
     rank = {"name+plz": 0, "name": 1}
-    n_fill = 0
+    n_fill, verdicts = 0, {}
     for i, hs in cand.items():
         best = None
         for h in hs:
-            v = verified.get(h) or {}
-            if v.get("verified") in rank and (best is None or rank[v["verified"]] < rank[best[1]]):
-                best = (h, v["verified"])
-        if best:
-            n_fill += 1
-            gdf.at[i, "website"] = f"https://{best[0]}"
-            gdf.at[i, "website_host"] = best[0]
-            gdf.at[i, "website_kind"] = "own"
-            gdf.at[i, "website_source"] = "guess"
-            gdf.at[i, "website_verified"] = best[1]
-            gdf.at[i, "website_verified_at"] = time.strftime("%Y-%m-%d")
-    print(f"[discover] verified sites written: {n_fill} of {len(rows)} rows "
-          f"({cache['verified'].value_counts().to_dict()})")
+            rec = recs.get(h)
+            if rec is None:
+                continue
+            v = impressum.verdict(rec, rows.at[i, "name"], rows.at[i, "address_postcode"])
+            verdicts[v] = verdicts.get(v, 0) + 1
+            if v in rank and ccindex.accept(rec, v, rows.at[i, "name"], h.split(".")[0]) \
+                    and (best is None or rank[v] < rank[best[1]]):
+                best = (h, v, rec)
+        if best is None:
+            continue
+        h, v, rec = best
+        n_fill += 1
+        impressum.keep_replaced(gdf, i)
+        gdf.at[i, "website"] = f"https://{h}"
+        gdf.at[i, "website_host"] = h
+        gdf.at[i, "website_kind"] = "own"
+        gdf.at[i, "website_source"] = "guess"
+        impressum.write_row(gdf, i, rec, v, today)
+    print(f"[discover] candidate verdicts {verdicts}; verified sites written: {n_fill} of {len(rows)} rows")
     for p in [*export.write_merged(gdf, data_root, scope), export.write_summary(gdf, data_root, scope, None, {})]:
         print(f"[out] {p}")
     return gdf

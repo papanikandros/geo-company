@@ -176,7 +176,7 @@ def match(data_root: Path, scope: str, industrial_only: bool = True, limit: int 
     prev = gdf["website_source"] == "cc"                    # idempotent: an earlier run of this route is redone
     if prev.any():
         for c in ["website", "website_host", "website_kind", "website_source", "website_verified", "website_verified_at",
-                  "legal_name"] + impressum.EXTRA_COLUMNS:
+                  "legal_name", "website_replaced", "website_replaced_source"] + impressum.EXTRA_COLUMNS:
             gdf.loc[prev, c] = pd.NA
         print(f"[ccindex] reset {int(prev.sum())} rows of an earlier run")
     verified = gdf["website_verified"].isin(["name+plz", "name"])
@@ -216,6 +216,7 @@ def match(data_root: Path, scope: str, industrial_only: bool = True, limit: int 
             continue
         host, v, rec = best
         n_fill += 1
+        impressum.keep_replaced(gdf, i)
         gdf.at[i, "website"] = f"https://{host}"
         gdf.at[i, "website_host"] = host
         gdf.at[i, "website_kind"] = "own"

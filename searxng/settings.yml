@@ -4,7 +4,7 @@
 # a single address: yahoo, mojeek; brave / duckduckgo / qwant block within minutes).
 use_default_settings:
   engines:
-    keep_only: [yahoo, mojeek, duckduckgo, brave, qwant, startpage]
+    keep_only: [yahoo, mojeek, duckduckgo, brave, qwant, startpage, yandex, wiby, marginalia, seznam, presearch]
 general:
   debug: false
   instance_name: "geoextract search"

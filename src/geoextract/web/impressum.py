@@ -31,6 +31,7 @@ register).
 from __future__ import annotations
 
 import concurrent.futures as cf
+import functools
 import html as _html
 import re
 import time
@@ -177,6 +178,11 @@ def _name_candidate(line: str) -> str | None:
     return cand
 
 
+@functools.lru_cache(maxsize=4)
+def _court_patterns(courts: frozenset[str]) -> list[tuple[re.Pattern, str]]:
+    return [(re.compile(r"\b" + re.escape(c) + r"\b", re.IGNORECASE), c) for c in sorted(courts, key=len, reverse=True)]
+
+
 def extract(text: str, courts: set[str] | None = None, host: str | None = None,
             cities: set[str] | None = None) -> dict:
     """Typed imprint fields from the page text. Empty dict values are None; ``imp_score`` in
@@ -198,7 +204,7 @@ def extract(text: str, courts: set[str] | None = None, host: str | None = None,
     low = {c.lower(): c for c in (courts or ())}
     raw_court = None
     if low:   # a known court name anywhere on a line that names the register / court
-        court_res = [(re.compile(r"\b" + re.escape(c) + r"\b", re.IGNORECASE), c) for c in sorted(courts, key=len, reverse=True)]
+        court_res = _court_patterns(frozenset(courts))
         for ln in lines:
             if not _COURT_LINE_RE.search(ln):
                 continue
@@ -327,10 +333,21 @@ def text_postcodes(text: str) -> list[str]:
 # --- fetching --------------------------------------------------------------------------------
 
 def fetch_html(session: requests.Session, url: str) -> tuple[str, str, int] | None:
-    """(final url, html, status) of ``url``; None when the request fails."""
-    try:
-        r = session.get(url, timeout=TIMEOUT, stream=True, allow_redirects=True, headers={"User-Agent": USER_AGENT})
-    except requests.RequestException:
+    """(final url, html, status) of ``url``; None when the request fails. A connection
+    failure is retried once after two seconds: under load the resolver and the upstream
+    return transient errors that look like a dead host (the DE run of 2026-09-16 marked
+    76 % of hosts dead at 32 parallel fetches; 20 of 24 answered on a second try)."""
+    r = None
+    for attempt in range(2):
+        try:
+            r = session.get(url, timeout=TIMEOUT, stream=True, allow_redirects=True, headers={"User-Agent": USER_AGENT})
+            break
+        except requests.exceptions.SSLError:
+            return None                       # a certificate problem is not transient
+        except requests.RequestException:
+            if attempt == 0:
+                time.sleep(2.0)
+    if r is None:
         return None
     raw = b""
     try:
@@ -342,6 +359,19 @@ def fetch_html(session: requests.Session, url: str) -> tuple[str, str, int] | No
         return None
     enc = r.encoding or "utf-8"
     return r.url, raw.decode(enc, errors="replace"), r.status_code
+
+
+def safe_process_host(session: requests.Session, host: str, courts: set[str] | None = None,
+                      cities: set[str] | None = None) -> dict:
+    """process_host that never raises: a malformed host or a library error becomes the
+    status ``error`` (one bad host must not stop a run of 75 000)."""
+    if not isinstance(host, str) or "." not in host or " " in host or len(host) > 253:
+        return {"host": host, "status": "error", "final_host": None, "imp_url": None, "tokens": [], "postcodes": [], "text": None}
+    try:
+        return process_host(session, host, courts, cities)
+    except Exception as exc:   # noqa: BLE001 — any failure is recorded, not raised
+        return {"host": host, "status": "error", "final_host": None, "imp_url": None, "tokens": [], "postcodes": [],
+                "text": None, "imp_legal_name": f"error: {type(exc).__name__}"[:80]}
 
 
 def process_host(session: requests.Session, host: str, courts: set[str] | None = None,
@@ -366,9 +396,10 @@ def process_host(session: requests.Session, host: str, courts: set[str] | None =
     final_url, home_html, _ = home
     final_host = host_of(final_url) or host
     rec["final_host"] = final_host
-    if _registered(final_host) != _registered(host):
-        rec["status"] = "redirect_offdomain"
-        return rec
+    rec["redirected"] = _registered(final_host) != _registered(host)
+    # an off-domain redirect is followed ONE step: the landing site's imprint decides (a
+    # company on a new domain verifies, a parked or resold domain does not — its imprint
+    # names nobody or someone else); the status keeps the redirect visible
     home_text = page_text(home_html)
     if len(home_text) < 2000 and any(w in home_text.lower() for w in _PARKED_WORDS):
         rec["status"] = "parked"
@@ -385,10 +416,10 @@ def process_host(session: requests.Session, host: str, courts: set[str] | None =
         if "impressum" in home_text.lower() or "angaben gemäß" in home_text.lower():
             imprint_text, imprint_url = home_text, final_url
         else:
-            rec["status"] = "no_impressum"
+            rec["status"] = "redirect_offdomain" if rec["redirected"] else "no_impressum"
             rec["tokens"], rec["postcodes"] = text_tokens(home_text), text_postcodes(home_text)
             return rec
-    rec["status"] = "ok"
+    rec["status"] = "ok_redirected" if rec["redirected"] else "ok"
     rec["imp_url"] = imprint_url
     rec["text"] = imprint_text[:TEXT_CAP]
     rec.update(extract(imprint_text, courts, host, cities))
@@ -404,8 +435,13 @@ def _as_list(v) -> list:
     return list(v)
 
 
+OK_STATUS = ("ok", "ok_redirected")
+
+
 def verdict(rec: dict, name: object, postcode: object) -> str:
-    if rec.get("status") != "ok":
+    """Per-row verdict; a redirected host whose landing imprint does not name the company
+    keeps the verdict ``redirect_offdomain``."""
+    if rec.get("status") not in OK_STATUS:
         return rec.get("status") or "dead"
     toks = name_tokens(name)
     have = set(_as_list(rec.get("tokens")))
@@ -417,6 +453,8 @@ def verdict(rec: dict, name: object, postcode: object) -> str:
         return "name+plz"
     if name_ok:
         return "name"
+    if rec.get("status") == "ok_redirected":
+        return "redirect_offdomain"
     if plz_ok:
         return "plz"
     return "mismatch"
@@ -428,9 +466,20 @@ def ensure_columns(gdf: pd.DataFrame) -> None:
     for c in EXTRA_COLUMNS:
         if c not in gdf.columns:
             gdf[c] = pd.array([None] * len(gdf), dtype="Float64" if c == "imp_score" else "string")
-    for c in ("website_verified", "website_verified_at", "legal_name"):
+    for c in ("website_verified", "website_verified_at", "legal_name", "website_replaced", "website_replaced_source"):
         if c not in gdf.columns:
             gdf[c] = pd.array([None] * len(gdf), dtype="string")
+
+
+def keep_replaced(gdf: pd.DataFrame, i) -> None:
+    """Audit trail before a discovery route overwrites an UNVERIFIED website: the old URL
+    and where it came from are kept in ``website_replaced`` / ``website_replaced_source``
+    (a verified site is never overwritten — the routes only see unverified rows)."""
+    old = gdf.at[i, "website"] if "website" in gdf.columns else None
+    if isinstance(old, str) and old.strip():
+        gdf.at[i, "website_replaced"] = old
+        src = gdf.at[i, "website_source"] if "website_source" in gdf.columns else None
+        gdf.at[i, "website_replaced_source"] = src if isinstance(src, str) else None
 
 
 def write_row(gdf: pd.DataFrame, i, rec: dict, v: str, today: str) -> None:
@@ -438,7 +487,11 @@ def write_row(gdf: pd.DataFrame, i, rec: dict, v: str, today: str) -> None:
     stage and the discovery routes that verify through it)."""
     gdf.at[i, "website_verified"] = v
     gdf.at[i, "website_verified_at"] = today
-    if rec.get("status") == "ok":
+    if rec.get("status") == "ok_redirected" and v in ("name+plz", "name") and isinstance(rec.get("final_host"), str):
+        keep_replaced(gdf, i)
+        gdf.at[i, "website"] = f"https://{rec['final_host']}"      # the company moved domains: keep the site it forwards to
+        gdf.at[i, "website_host"] = rec["final_host"]
+    if rec.get("status") in OK_STATUS:
         for c in EXTRA_COLUMNS:
             val = rec.get(c)
             if val is not None and not (isinstance(val, float) and pd.isna(val)):
@@ -467,6 +520,43 @@ def _known(data_root: Path, col: str) -> set[str]:
     return {str(c).strip() for c in out if c and len(str(c).strip()) >= 3}
 
 
+_W: dict = {}
+
+
+def _pool_init(courts: set[str], cities: set[str]) -> None:
+    _W["session"] = requests.Session()
+    _W["session"].headers.update({"User-Agent": USER_AGENT})
+    _W["courts"], _W["cities"] = courts, cities
+
+
+def _pool_chunk(hosts: list[str]) -> list[dict]:
+    with cf.ThreadPoolExecutor(max_workers=4) as ex:
+        recs = list(ex.map(lambda h: safe_process_host(_W["session"], h, _W["courts"], _W["cities"]), hosts))
+    for r in recs:
+        r["checked_at"] = time.strftime("%Y-%m-%d")
+    return recs
+
+
+def fetch_many(todo: list[str], courts: set[str], cities: set[str], workers: int, on_progress, chunk: int = 40):
+    """Fetch + extract ``todo`` hosts with ``workers`` PROCESSES (4 threads each); yields
+    lists of records chunk by chunk (CPU work spreads over cores, network latency overlaps)."""
+    import os as _os
+    n_proc = max(1, min(workers, _os.cpu_count() or 1))
+    chunks = [todo[k:k + chunk] for k in range(0, len(todo), chunk)]
+    with cf.ProcessPoolExecutor(max_workers=n_proc, initializer=_pool_init, initargs=(courts, cities)) as ex:
+        for recs in ex.map(_pool_chunk, chunks):
+            yield recs
+            on_progress(len(recs))
+
+
+def _merge_cache(cache: pd.DataFrame, new: list[dict]) -> pd.DataFrame:
+    cache = pd.concat([cache, pd.DataFrame(new)], ignore_index=True).drop_duplicates("host", keep="last")
+    for c in cache.columns:
+        if c not in ("tokens", "postcodes"):
+            cache[c] = cache[c].astype("string") if c != "imp_score" else pd.to_numeric(cache[c], errors="coerce")
+    return cache
+
+
 def fetch_hosts(data_root: Path, hosts: list[str], workers: int = 8, tag: str = "impressum") -> dict[str, dict]:
     """Imprint records for ``hosts`` through the shared host cache (fetching only the unknown
     ones); returns host → record."""
@@ -478,17 +568,18 @@ def fetch_hosts(data_root: Path, hosts: list[str], workers: int = 8, tag: str = 
         courts, cities = known_courts(data_root), known_cities(data_root)
         session = requests.Session()
         session.headers.update({"User-Agent": USER_AGENT})
-        t0, new = time.time(), []
-        with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-            for n, rec in enumerate(ex.map(lambda h: process_host(session, h, courts, cities), todo), 1):
-                rec["checked_at"] = time.strftime("%Y-%m-%d")
-                new.append(rec)
-                if n % 200 == 0 or n == len(todo):
-                    print(f"[{tag}] {n}/{len(todo)} hosts fetched ({time.time() - t0:.0f} s)")
-        cache = pd.concat([cache, pd.DataFrame(new)], ignore_index=True).drop_duplicates("host", keep="last")
-        for c in cache.columns:
-            if c not in ("tokens", "postcodes"):
-                cache[c] = cache[c].astype("string") if c != "imp_score" else pd.to_numeric(cache[c], errors="coerce")
+        t0, new, done = time.time(), [], [0]
+
+        def prog(k: int) -> None:
+            done[0] += k
+            if done[0] % 200 < k or done[0] == len(todo):
+                print(f"[{tag}] {done[0]}/{len(todo)} hosts fetched ({time.time() - t0:.0f} s)")
+
+        for recs in fetch_many(todo, courts, cities, max(1, workers // 4), prog):
+            new.extend(recs)
+            if len(new) >= 500:
+                cache = _merge_cache(cache, new); cache.to_parquet(cache_p, index=False); new = []
+        cache = _merge_cache(cache, new)
         cache.to_parquet(cache_p, index=False)
         known = {r["host"]: r for r in cache.to_dict("records")}
     return {h: known[h] for h in hosts if h in known}
@@ -517,7 +608,7 @@ def run(data_root: Path, scope: str, industrial_only: bool = True, limit: int | 
         recs_re = cache.to_dict("records")
         n_re = 0
         for r in recs_re:
-            if r.get("status") == "ok" and isinstance(r.get("text"), str) and r["text"]:
+            if r.get("status") in OK_STATUS and isinstance(r.get("text"), str) and r["text"]:
                 r.update(extract(r["text"], courts, r["host"], cities))
                 n_re += 1
         cache = pd.DataFrame(recs_re)
@@ -525,22 +616,28 @@ def run(data_root: Path, scope: str, industrial_only: bool = True, limit: int | 
     known = {} if refetch else {r["host"]: r for r in cache.to_dict("records")}
     todo = [h for h in hosts if h not in known]
     print(f"[impressum] {scope}: {len(rows)} own-website rows, {len(hosts)} hosts, {len(todo)} to fetch")
-    session = requests.Session()
-    session.headers.update({"User-Agent": USER_AGENT})
-    t0, done, new = time.time(), 0, []
-    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-        for rec in ex.map(lambda h: process_host(session, h, courts, cities), todo):
-            rec["checked_at"] = time.strftime("%Y-%m-%d")
-            new.append(rec)
-            done += 1
-            if done % 100 == 0 or done == len(todo):
-                print(f"[impressum] {done}/{len(todo)} hosts ({time.time() - t0:.0f} s)")
-    if new:
-        cache = pd.concat([cache, pd.DataFrame(new)], ignore_index=True).drop_duplicates("host", keep="last")
-        for c in cache.columns:
-            if c not in ("tokens", "postcodes"):
-                cache[c] = cache[c].astype("string") if c != "imp_score" else pd.to_numeric(cache[c], errors="coerce")
+    t0, done, new = time.time(), [0], []
+
+    def _save() -> None:
+        nonlocal cache, new
+        if not new:
+            return
+        cache = _merge_cache(cache, new)
         cache.to_parquet(cache_p, index=False)
+        new = []
+
+    def prog(k: int) -> None:
+        done[0] += k
+        if done[0] % 200 < k or done[0] == len(todo):
+            print(f"[impressum] {done[0]}/{len(todo)} hosts ({time.time() - t0:.0f} s)")
+
+    # ``workers`` = fetch threads in total: processes of 4 threads each (the interpreter lock
+    # made a single process CPU-bound at ≈ 3 hosts/s on the DE run)
+    for recs in fetch_many(todo, courts, cities, max(1, workers // 4), prog):
+        new.extend(recs)
+        if len(new) >= 500:
+            _save()                          # a crash or a stop loses at most 500 hosts
+    _save()
     recs = {r["host"]: r for r in cache.to_dict("records")}
     # write back per row
     ensure_columns(gdf)

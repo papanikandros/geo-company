@@ -50,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_reg_match = reg_sub.add_parser("match", help="join the merged table to the register tables (name + postcode)")
     p_reg_match.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
     p_reg_match.add_argument("--sources", default="hr2022,gleif,hr2019", help="register sources to use")
+    p_reg_match.add_argument("--refresh", action="store_true", help="redo the name join even when its cache matches the table")
     _add_common(p_reg_match)
     p_reg_rec = reg_sub.add_parser("reconcile", help="register → map diff: register-only companies, geocoded offline")
     p_reg_rec.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
@@ -74,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_web_disc.add_argument("--all", action="store_true", help="all named rows without a site (default: industrial only)")
     p_web_disc.add_argument("--limit", type=int, default=None)
     p_web_disc.add_argument("--dry-run", action="store_true", help="candidates + DNS only, no page fetches, no write")
+    p_web_disc.add_argument("--workers", type=int, default=8, help="fetch threads in total (processes of 4)")
     _add_common(p_web_disc)
     p_web_imp = web_sub.add_parser("impressum", help="stage 1: fetch the imprint of every own website, extract the legal fields")
     p_web_imp.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
@@ -100,6 +102,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_web_se.add_argument("--threshold", type=float, default=0.3, help="minimum ranker probability of a host to be fetched")
     p_web_se.add_argument("--workers", type=int, default=8)
     p_web_se.add_argument("--dry-run", action="store_true", help="queries + ranking only, no imprint fetch, no write")
+    p_web_se.add_argument("--register-backed", action="store_true", help="run: only companies joined to a register company")
+    p_web_se.add_argument("--cached-only", action="store_true", help="train: no network, only companies with cached answers")
     _add_common(p_web_se)
 
     p_serve = sub.add_parser("serve", help="serve the merged table (item 7): build / api / push")
@@ -157,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
         from . import paths as _paths
         from .register import match as register_match
         register_match.run(_paths.data_root(args.data_dir), _config.scope_name(args.scope),
-                           [x.strip() for x in args.sources.split(",") if x.strip()])
+                           [x.strip() for x in args.sources.split(",") if x.strip()], refresh=args.refresh)
         return 0
     if args.command == "register" and args.register_cmd == "reconcile":
         from . import config as _config
@@ -177,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
         from . import paths as _paths
         from .web import discover as web_discover
         web_discover.discover(_paths.data_root(args.data_dir), _config.scope_name(args.scope),
-                              industrial_only=not args.all, limit=args.limit, dry_run=args.dry_run)
+                              industrial_only=not args.all, limit=args.limit, dry_run=args.dry_run, workers=args.workers)
         return 0
     if args.command == "web" and args.web_cmd == "impressum":
         from . import config as _config
@@ -204,10 +208,11 @@ def main(argv: list[str] | None = None) -> int:
         from .web import search as web_search
         root, scope = _paths.data_root(args.data_dir), _config.scope_name(args.scope)
         if args.se_cmd == "train":
-            web_search.train(root, scope, industrial_only=False, limit=args.limit)
+            web_search.train(root, scope, industrial_only=False, limit=args.limit, cached_only=args.cached_only)
         else:
             web_search.run(root, scope, industrial_only=not args.all, limit=args.limit, topk=args.topk,
-                           threshold=args.threshold, workers=args.workers, dry_run=args.dry_run)
+                           threshold=args.threshold, workers=args.workers, dry_run=args.dry_run,
+                           register_backed=args.register_backed)
         return 0
     if args.command == "web" and args.web_cmd == "hygiene":
         from .pipeline import run_web_hygiene

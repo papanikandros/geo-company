@@ -45,7 +45,10 @@ from .hygiene import host_of
 SEARX_URL = os.environ.get("GEOEXTRACT_SEARX_URL", "http://127.0.0.1:8888")
 # pace: 1/s survived > 4 000 queries in an hour; 4/s got Yahoo to refuse after ≈ 1 500 queries in
 # ten minutes (2026-09-15) — the short ramp blocks (200 queries) had not shown that
-QPS = float(os.environ.get("GEOEXTRACT_SEARX_QPS", "1"))
+QPS = float(os.environ.get("GEOEXTRACT_SEARX_QPS", "0.8"))   # 1/s got blocked after ≈ 3 600 queries in an hour (2026-09-17)
+BLOCK_WAIT = int(os.environ.get("GEOEXTRACT_SEARX_BLOCK_WAIT", "900"))   # a Yahoo block lasted ≈ 15 min every time
+ENGINE_COOLDOWN = 600.0      # an engine that refused or answered junk is rested for ten minutes
+_COOLDOWN: dict = {}         # engine → time until which it rests (engine rotation)
 QUERY_SLEEP = 1.0 / QPS
 FEATURES = ["sim_title", "sim_host", "sim_snippet", "city_in", "plz_in", "street_in", "best_rank", "n_hits",
             "n_queries", "listed", "host_freq", "tld_de", "label_len", "label_is_key", "legal_form_in_title", "n_engines"]
@@ -116,6 +119,44 @@ class SearchCache:
 
 
 _BLOCK_WORDS = ("suspended", "too many", "captcha", "access denied", "blocked")
+_GENERIC_Q = {"gmbh", "impressum", "und", "der", "die", "das", "co", "kg", "ag", "ug", "ohg", "gbr", "ev", "e.v.", "str", "strasse",
+              "stadt", "haus", "shop", "service", "group", "gruppe", "germany", "deutschland", "international", "industrie"}
+
+
+_CITY_TOKENS: set[str] | None = None
+
+
+def _city_tokens() -> set[str]:
+    """Words of all German municipality names (register tables): a result that only shares
+    the town with the query ("Traunstein" on a Wikipedia page) is not about the company."""
+    global _CITY_TOKENS
+    if _CITY_TOKENS is None:
+        try:
+            from .. import paths as _paths
+            cities = impressum.known_cities(_paths.data_root(None))
+        except Exception:   # noqa: BLE001 — without the tables the check falls back to plain tokens
+            cities = set()
+        _CITY_TOKENS = {w for c in cities for w in re.findall(r"[a-zäöüß]{4,}", c.lower())}
+    return _CITY_TOKENS
+
+
+def relevant(q: str, results: list[dict]) -> bool:
+    """A soft-blocked engine answers 200 with unrelated pages (Yahoo, 2026-09-17: 85 % of a
+    German run came back as 'currenttime.now', 'wikipedia.org', 'amazon.es' for company
+    queries). An answer counts as relevant when at least one result shares a distinctive
+    query token (≥ 4 characters, not generic) with its host, title or snippet; an empty
+    answer is relevant (an honest 'nothing found')."""
+    if not results:
+        return True
+    toks = {t for t in re.findall(r"[a-zäöüß0-9]{4,}", q.lower()) if t not in _GENERIC_Q}
+    toks -= _city_tokens()                  # the town name alone proves nothing
+    if not toks:
+        return True
+    for r in results:
+        text = (r.get("url", "") + " " + r.get("title", "") + " " + r.get("content", "")).lower()
+        if any(t in text for t in toks):
+            return True
+    return False
 
 
 def search_one(session: requests.Session, q: str, engines: str | None = None) -> list[dict] | None:
@@ -143,6 +184,8 @@ def search_one(session: requests.Session, q: str, engines: str | None = None) ->
             continue
         out.append({"url": url, "title": res.get("title") or "", "content": res.get("content") or "",
                     "engines": res.get("engines") or [], "rank": min(res.get("positions") or [i])})
+    if not relevant(q, out):
+        return None                          # soft block: unrelated results — not cached, counts as failed
     return out
 
 
@@ -303,12 +346,26 @@ def run_batch(session: requests.Session, cache: SearchCache, todo: list[str], qp
     t0 = time.time()
     fails = 0
 
+    pool = [e.strip() for e in (engines or "").split(",") if e.strip()] or [None]
+
+    def healthy(k: int):
+        """Round-robin over the engines NOT in cooldown; all in cooldown → plain round-robin."""
+        now = time.time()
+        live = [e for e in pool if _COOLDOWN.get(e, 0) <= now]
+        return (live or pool)[k % len(live or pool)]
+
     def one(k_q):
         k, q = k_q
         d = t0 + k / qps - time.time()
         if d > 0:
             time.sleep(d)
-        return q, search_one(session, q, engines)
+        eng = healthy(k)
+        res = search_one(session, q, eng)
+        if res is None:
+            _COOLDOWN[eng] = time.time() + ENGINE_COOLDOWN     # blocked, captcha or junk: rest it
+            if len(pool) > 1:
+                res = search_one(session, q, healthy(k + 1))
+        return q, res
 
     with cf.ThreadPoolExecutor(max_workers=max(1, math.ceil(qps))) as ex:
         for q, res in ex.map(one, enumerate(todo)):
@@ -336,16 +393,18 @@ def _collect(data_root: Path, rows: pd.DataFrame, tag: str, batch: int = 100) ->
                                rows.at[i, "district"], rows.at[i, "address_street"]) for i in chunk}
             todo = sorted({q for qs in qmap.values() for q in qs if cache.get(q) is None})
             fails = run_batch(session, cache, todo, QPS, engines)
-            if todo and fails > len(todo) / 2:
+            while len(todo) >= 20 and fails > len(todo) / 2:   # a block, not the noise of a tiny batch
+                # the engine refuses: wait a block out (a long run must survive it), retry the
+                # batch; give up only after six blocked waits in a row (≈ 1.5 h without answers)
                 bad_batches += 1
-                print(f"[search:{tag}] {fails}/{len(todo)} answers failed — waiting 60 s and retrying the batch once")
-                time.sleep(60)
-                retry = [q for q in todo if cache.get(q) is None]
-                fails = run_batch(session, cache, retry, QPS, engines)
-                if bad_batches >= 3:
-                    raise RuntimeError("search engine unresponsive for three batches in a row — stopping (cache kept)")
-            else:
-                bad_batches = 0
+                if bad_batches > 6:
+                    raise RuntimeError("search engine unresponsive for six waits in a row — stopping (cache kept)")
+                print(f"[search:{tag}] {fails}/{len(todo)} answers failed — waiting {BLOCK_WAIT} s for the block to lift "
+                      f"(wait {bad_batches} of 6)")
+                time.sleep(BLOCK_WAIT)
+                todo = [q for q in todo if cache.get(q) is None]
+                fails = run_batch(session, cache, todo, QPS, engines)
+            bad_batches = 0
             n_q += len(todo) - fails
             n_fail += fails
             for i, qs in qmap.items():
@@ -367,7 +426,8 @@ def _collect(data_root: Path, rows: pd.DataFrame, tag: str, batch: int = 100) ->
 
 # --- train / run ------------------------------------------------------------------------------
 
-def train(data_root: Path, scope: str, industrial_only: bool = False, limit: int | None = None) -> Path:
+def train(data_root: Path, scope: str, industrial_only: bool = False, limit: int | None = None,
+          cached_only: bool = False) -> Path:
     import geopandas as gpd
     import joblib
     from sklearn.ensemble import HistGradientBoostingClassifier
@@ -375,10 +435,25 @@ def train(data_root: Path, scope: str, industrial_only: bool = False, limit: int
 
     gdf = gpd.read_parquet(paths.merged_parquet(data_root, scope, "4326"))
     rows = _company_rows(gdf, verified=True, industrial_only=industrial_only)
-    if limit:
-        rows = rows.head(limit)
+    if limit and len(rows) > limit:
+        rows = rows.sample(limit, random_state=0)      # a random sample, not the first rows (one region)
     print(f"[search:train] {scope}: {len(rows)} companies with a verified own site")
-    per_row, freq = _collect(data_root, rows, "train")
+    if cached_only:                          # no network: only companies whose answers are cached
+        cache = SearchCache(data_root)
+        per_row = {}
+        for i, r in rows.iterrows():
+            qs = queries(r["name"], _legal(r), r.get("address_city"), r.get("district"), r.get("address_street"))
+            res = {q: cache.get(q) for q in qs if cache.get(q)}
+            if res:
+                per_row[i] = res
+        freq = {}
+        for res in per_row.values():
+            for h in {_registered(host_of(x["url"]) or "") for hits in res.values() for x in hits}:
+                if h:
+                    freq[h] = freq.get(h, 0) + 1
+        print(f"[search:train] cached answers for {len(per_row)} companies")
+    else:
+        per_row, freq = _collect(data_root, rows, "train")
     frames = []
     for i, res in per_row.items():
         r = rows.loc[i]
@@ -422,7 +497,7 @@ def train(data_root: Path, scope: str, industrial_only: bool = False, limit: int
 
 
 def run(data_root: Path, scope: str, industrial_only: bool = True, limit: int | None = None, topk: int = 3,
-        threshold: float = 0.3, workers: int = 8, dry_run: bool = False) -> pd.DataFrame:
+        threshold: float = 0.3, workers: int = 8, dry_run: bool = False, register_backed: bool = False) -> pd.DataFrame:
     import geopandas as gpd
     import joblib
 
@@ -434,10 +509,13 @@ def run(data_root: Path, scope: str, industrial_only: bool = True, limit: int | 
     prev = gdf["website_source"] == "search"
     if prev.any():
         for c in ["website", "website_host", "website_kind", "website_source", "website_verified", "website_verified_at",
-                  "website_score", "legal_name"] + impressum.EXTRA_COLUMNS:
+                  "website_score", "legal_name", "website_replaced", "website_replaced_source"] + impressum.EXTRA_COLUMNS:
             gdf.loc[prev, c] = pd.NA
         print(f"[search] reset {int(prev.sum())} rows of an earlier run")
     rows = _company_rows(gdf, verified=False, industrial_only=industrial_only)
+    if register_backed:   # the confirmed firms first: rows joined to a register company (exact or by name)
+        rows = rows[rows["hr_id"].notna()] if "hr_id" in rows.columns else rows.iloc[0:0]
+        print(f"[search] register-backed residual: {len(rows)} companies")
     places = place_keys(gdf, data_root)
     reasons = rows["name"].map(lambda n: skip_reason(n, places))
     print(f"[search] skipped before any query: {reasons.dropna().value_counts().to_dict()} of {len(rows)}")
@@ -485,6 +563,7 @@ def run(data_root: Path, scope: str, industrial_only: bool = True, limit: int | 
             continue
         host, v, rec, p = best
         n_fill += 1
+        impressum.keep_replaced(gdf, i)
         gdf.at[i, "website"] = f"https://{host}"
         gdf.at[i, "website_host"] = host
         gdf.at[i, "website_kind"] = "own"

@@ -47,3 +47,30 @@ def test_verdict():
     assert impressum.verdict(rec, "Bäckerei Meier", "79115") == "plz"
     assert impressum.verdict(rec, "Bäckerei Meier", "28195") == "mismatch"
     assert impressum.verdict({"status": "dead"}, "X", None) == "dead"
+
+
+def test_redirected_host_verdict_and_writeback():
+    import pandas as pd
+    rec = {"status": "ok_redirected", "final_host": "huth-zaun.de", "tokens": ["huth", "zaun", "torsysteme", "bremerhaven"],
+           "postcodes": ["27572"], "imp_plz": "27572", "imp_legal_name": "Huth Zaun + Torsysteme GmbH"}
+    assert impressum.verdict(rec, "Huth Zaun + Torsysteme GmbH", "27572") == "name+plz"
+    assert impressum.verdict(rec, "Bäckerei Meier", "27572") == "redirect_offdomain"    # landing imprint names someone else
+    gdf = pd.DataFrame({"name": ["Huth Zaun + Torsysteme GmbH"], "website": ["https://hzt.de"], "website_host": ["hzt.de"],
+                        "legal_form": [None]})
+    impressum.ensure_columns(gdf)
+    impressum.write_row(gdf, 0, rec, "name+plz", "2026-09-16")
+    assert gdf.at[0, "website_host"] == "huth-zaun.de" and gdf.at[0, "legal_name"] == "Huth Zaun + Torsysteme GmbH"
+
+
+def test_keep_replaced_records_the_old_unverified_site():
+    import pandas as pd
+    gdf = pd.DataFrame({"name": ["Muster GmbH"], "website": ["https://alt-muster.de"], "website_host": ["alt-muster.de"],
+                        "website_source": ["extract"], "legal_form": [None]})
+    impressum.ensure_columns(gdf)
+    impressum.keep_replaced(gdf, 0)
+    assert gdf.at[0, "website_replaced"] == "https://alt-muster.de"
+    assert gdf.at[0, "website_replaced_source"] == "extract"
+    empty = pd.DataFrame({"name": ["X"], "website": [None], "website_source": [None], "legal_form": [None]})
+    impressum.ensure_columns(empty)
+    impressum.keep_replaced(empty, 0)
+    assert pd.isna(empty.at[0, "website_replaced"])        # nothing to keep

@@ -91,20 +91,30 @@ def token_idf(keys: pd.Series) -> dict[str, float]:
     return {t: float(np.log(n / c)) for t, c in df.items()}
 
 
+SCORE_SLICE = 400   # map rows scored at once: a big-city postcode block (5 000 map rows ×
+                    # 60 000 register names) as one float64 matrix took gigabytes and got
+                    # the DE run killed (2026-09-17); a slice of 400 × 60 000 bytes is 24 MB
+
+
 def _score_block(map_full, map_light, reg_full, reg_light, cutoff: float) -> np.ndarray:
-    """Best-of-both-keys token_sort_ratio matrix (map rows × register rows)."""
-    a = process.cdist(map_full, reg_full, scorer=fuzz.token_sort_ratio, score_cutoff=cutoff, workers=-1)
-    b = process.cdist(map_light, reg_light, scorer=fuzz.token_sort_ratio, score_cutoff=cutoff, workers=-1)
+    """Best-of-both-keys token_sort_ratio matrix (map rows × register rows), uint8."""
+    a = process.cdist(map_full, reg_full, scorer=fuzz.token_sort_ratio, score_cutoff=cutoff, workers=-1, dtype=np.uint8)
+    b = process.cdist(map_light, reg_light, scorer=fuzz.token_sort_ratio, score_cutoff=cutoff, workers=-1, dtype=np.uint8)
     return np.maximum(a, b)
 
 
 def _candidates_for_block(mi: np.ndarray, ri: np.ndarray, M: pd.DataFrame, R: pd.DataFrame,
                           kind: str, out: list, idf: dict[str, float]) -> None:
-    """Append (map_idx, reg_idx, score, type) tuples for one block."""
+    """Append (map_idx, reg_idx, score, type) tuples for one block, map side in slices."""
     if not len(mi) or not len(ri):
         return
-    scores = _score_block(M["kf"].values[mi].tolist(), M["kl"].values[mi].tolist(),
-                          R["kf"].values[ri].tolist(), R["kl"].values[ri].tolist(),
+    r_kf_l, r_kl_l = R["kf"].values[ri].tolist(), R["kl"].values[ri].tolist()
+    for k in range(0, len(mi), SCORE_SLICE):
+        _candidates_for_slice(mi[k:k + SCORE_SLICE], ri, M, R, kind, out, idf, r_kf_l, r_kl_l)
+
+
+def _candidates_for_slice(mi, ri, M, R, kind, out, idf, r_kf_l, r_kl_l) -> None:
+    scores = _score_block(M["kf"].values[mi].tolist(), M["kl"].values[mi].tolist(), r_kf_l, r_kl_l,
                           config.DEDUP_NAME_RATIO)
     rows, cols = np.nonzero(scores >= config.DEDUP_NAME_RATIO)
     if not len(rows):
@@ -318,14 +328,22 @@ def exact_frame(map_df: pd.DataFrame, companies: pd.DataFrame, scope_plz: set[st
     comp["_in_scope"] = comp["postcode"].astype("string").isin(scope_plz).fillna(False)
     comp = comp.sort_values(["_srank", "_active"], ascending=[True, False])
     comp["_suffix"] = comp["register_number"].astype(str).str.extract(r"\d\s*([A-Za-z]{1,3})\s*$")[0].str.upper()
-    groups = {k: g for k, g in comp.groupby(["_type", "_num"], sort=False)}
+    # only the register numbers the imprints mention are looked up: 35 000 keys instead of
+    # one DataFrame per number for 8.7 M companies (that dictionary took the DE run to 45 GB)
+    wanted = set()
+    for typ_v, num_v in zip(map_df.loc[ok, "imp_register_type"], map_df.loc[ok, "imp_register_no"]):
+        typ = str(typ_v).upper() if isinstance(typ_v, str) else "HRB"
+        wanted.add((typ, str(num_v).lstrip("0") or "0"))
+    comp = comp[[(t, n) in wanted for t, n in zip(comp["_type"], comp["_num"])]]
+    indices = comp.groupby(["_type", "_num"], sort=False).indices
     n_court = n_unique = n_other = 0
     for idx, row in map_df[ok].iterrows():
         typ = str(row["imp_register_type"]).upper() if isinstance(row.get("imp_register_type"), str) else "HRB"
         num = str(row["imp_register_no"]).lstrip("0") or "0"
-        grp = groups.get((typ, num))
-        if grp is None:
+        pos = indices.get((typ, num))
+        if pos is None:
             continue
+        grp = comp.iloc[pos]
         court = row.get("imp_court")
         reg = str(row.get("imp_registration") or "")
         suffix = reg.split()[-1].upper() if len(reg.split()) == 3 else None
@@ -459,7 +477,7 @@ def apply_match(gdf: pd.DataFrame, result: pd.DataFrame) -> pd.DataFrame:
     return gdf
 
 
-def run(data_root: Path, scope: str, sources: list[str] | None = None) -> pd.DataFrame:
+def run(data_root: Path, scope: str, sources: list[str] | None = None, refresh: bool = False) -> pd.DataFrame:
     """Load merged table + register tables for ``scope``, match, write back (4326/3857/summary)."""
     import geopandas as gpd
 
@@ -477,7 +495,25 @@ def run(data_root: Path, scope: str, sources: list[str] | None = None) -> pd.Dat
     names = names[keep.fillna(False)].reset_index(drop=True)
     print(f"[register] scope {scope}: {len(gdf)} map rows, {len(names)} register name variants in scope "
           f"({names['hr_source'].value_counts().to_dict()})")
-    result = match_frame(gdf, names, companies)
+    # the name join (hours on Germany) is cached per scope: a rerun after new imprints — or
+    # after a crash in the exact stage — redoes only the exact join
+    cache_p = data_root / "geoextract" / "register" / f"name_join_{scope}.parquet"
+    ids = gdf["id"].astype(str)
+    result = None
+    if cache_p.exists() and not refresh:
+        cached = pd.read_parquet(cache_p)
+        if len(cached) == len(gdf) and (cached["id"].astype(str).values == ids.values).all():
+            result = cached.drop(columns=["id"]).set_index(gdf.index)
+            print(f"[register] name join read from {cache_p.name} ({len(result)} rows)")
+    if result is None:
+        result = match_frame(gdf, names, companies)
+        out = result.copy()
+        out.insert(0, "id", ids.values)
+        for c in out.columns:
+            if c != "id" and out[c].dtype == object:
+                out[c] = out[c].astype("string")
+        out.to_parquet(cache_p, index=False)
+        print(f"[register] name join cached → {cache_p}")
     exact = exact_frame(gdf, companies, plz)
     result = merge_exact(result, exact)
     gdf = apply_match(gdf, result)
