@@ -123,6 +123,18 @@
       }
       return parts;
     }
+    function matchedExpr() {
+      // "matched" = the company appears in at least two data layers: two sources of the map,
+      // or one source plus the register (Handelsregister match) or Wikidata (entity /
+      // operator item). Those get the green dot and the ring; everything else stays single.
+      var any = [[">", ["get", "sc"], 1]];
+      if (ui.register) any.push(["in", ["coalesce", ["get", "hr"], "none"], ["literal", HR_MATCHED]]);
+      if (ui.wikidata) any.push(["any"].concat(WD_MATCHED.map(function (k) {
+        return ["in", "+" + k + "+", ["coalesce", ["get", "wd"], ""]]; })));
+      return any.length === 1 ? any[0] : ["any"].concat(any);
+    }
+
+
     function regionExpr() {   // served-map filters (state / district / sector / industrial)
       var f = [];
       if ($("sel-state").value) f.push(["==", ["get", "st"], $("sel-state").value]);
@@ -186,9 +198,12 @@
       var hasSel = !!selected;
       map.setFilter("points", vis);
       map.setFilter("points-hit", vis);
-      map.setFilter("points-ring", ["all", vis, [">", ["get", "sc"], 1]]);
+      var m = matchedExpr();
+      map.setFilter("points-ring", ["all", vis, m]);
+      // a company confirmed by a second data layer always wears the match colour, dot and
+      // ring alike — the business-type palette only colours the unconfirmed ones
       map.setPaintProperty("points", "circle-color",
-        ["case", o, paletteExpr("bt"), ["case", [">", ["get", "sc"], 1], MATCH.matched, MATCH.only]]);
+        ["case", m, MATCH.matched, o, paletteExpr("bt"), MATCH.only]);
       map.setPaintProperty("points", "circle-radius", ["case", o, 3, 3.5]);
       map.setPaintProperty("points", "circle-opacity", hasSel ? 0.1 : ["case", o, 0.75, 0.85]);
       map.setPaintProperty("points-ring", "circle-stroke-opacity", hasSel ? 0.25 : 1);
