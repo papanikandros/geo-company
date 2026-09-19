@@ -133,8 +133,11 @@ docker network `proxy` as `geo-api`.
 ```bash
 # once, on the server: the builder needs tippecanoe compiled in
 IMAGE_TARGET=full docker compose build                # ≈ 450 MB, ~10 min
-SCOPE=bremen docker compose --profile build run --rm builder
-SCOPE=bremen docker compose up -d
+# the image runs as uid 10001 (Dockerfile); a fresh checkout's data dir is root-owned,
+# and the build dies on mkdir without this. serve_push.sh does it for you.
+mkdir -p data/serve && sudo chown -R 10001:10001 data
+IMAGE_TARGET=full SCOPE=bremen docker compose --profile build run --rm builder
+IMAGE_TARGET=full SCOPE=bremen docker compose up -d
 ```
 
 Ship a new data version to a server without moving tiles (they are built there):
@@ -143,8 +146,13 @@ Ship a new data version to a server without moving tiles (they are built there):
 scripts/serve_push.sh root@badserver1:/opt/geo-company bremen   # rsync inputs + remote build
 ```
 
-The script uploads only the inputs of `serve build` for that scope (Bremen ≈ 16 MB,
-DE ≈ 0.7 GB), runs the builder there, and flips the `current` symlink.
+The script uploads only the inputs of `serve build` for that scope, fixes the data-dir
+ownership, runs the builder there, and flips the `current` symlink. Sizes: Bremen ≈ 395 MB,
+DE ≈ 1.1 GB — dominated by the per-source parquets behind the merged table (OSM per state,
+the other four sources DE-wide), which power the nested per-source detail of tier `full`
+and `GET /v1/companies/{id}`. `PUSH_SOURCES=0` skips them: the build still succeeds and the
+map still works, but that detail is missing. A multi-state scope needs its extra OSM states
+named: `PUSH_OSM_STATES="bremen hamburg"`.
 
 ## Licences and attribution
 
