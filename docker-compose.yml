@@ -1,11 +1,16 @@
-# geoextract served map + API (serve-plan.md S4). One file for every target:
-#   laptop:            docker compose up -d            → http://localhost/
-#   VPS / institute:   SITE_ADDRESS=companies.example.org docker compose up -d   (Caddy gets TLS)
+# geoextract served map + API.
+#
+# TLS, hostnames and the outer basic-auth live in the SHARED Caddy stack on the
+# server (~/Workspace/server-proxy → /opt/proxy), which reaches this API over the
+# external docker network "proxy" under the alias "geo-api" and serves
+# data/serve/<SCOPE>/current/ as static files itself (PMTiles need HTTP Range).
+# Locally the API serves the page and the data on its own — no Caddy needed.
+#
+#   laptop:  SCOPE=bremen docker compose up -d      → http://localhost:8791/
+#   server:  docker compose up -d                   (proxy stack must be up: it owns the network)
 #
 # Layout on the host:  ./data/serve/<SCOPE>/<version>/  (built by the builder profile or by
 # `geoextract serve build`), with ./data/serve/<SCOPE>/current → the version to serve.
-# Caddy serves /data/* straight from that directory (tiles need HTTP Range; Caddy does it,
-# with gzip/zstd and long cache headers); everything else is proxied to the API.
 
 x-common: &common
   build:
@@ -25,48 +30,21 @@ services:
     read_only: true
     tmpfs:
       - /tmp            # csv / parquet exports are written here before streaming
-    expose:
-      - "8791"
-
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    depends_on:
-      - api
     ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
-      SCOPE: ${SCOPE:-DE}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./data/serve:/srv/serve:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      - "127.0.0.1:${API_PORT:-8791}:8791"   # localhost only; the proxy reaches it over the network below
+    networks:
+      proxy:
+        aliases:
+          - geo-api     # the name the shared Caddy proxies to
 
   # one-shot: merged parquet → serve version (tiles, extracts, manifest) + `current` switch
   builder:
     <<: *common
     profiles: ["build"]
     command: ["serve", "build", "--scope", "${SCOPE:-DE}", "--force"]
+    networks:
+      - proxy
 
-  # local metasearch for the website discovery stage (register-website-pipeline-plan.md 3d):
-  #   docker compose --profile search up -d searxng   → http://127.0.0.1:8888/ (JSON API)
-  # never part of the public stack; bound to the loopback address only
-  searxng:
-    image: searxng/searxng:latest
-    profiles: ["search"]
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8888:8080"
-    volumes:
-      - ./searxng:/etc/searxng:rw
-    environment:
-      SEARXNG_BASE_URL: http://127.0.0.1:8888/
-    cap_drop: [ALL]
-    cap_add: [CHOWN, SETGID, SETUID]
-
-volumes:
-  caddy_data:
-  caddy_config:
+networks:
+  proxy:
+    external: true      # created by the shared proxy stack

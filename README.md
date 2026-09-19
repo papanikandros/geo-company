@@ -116,24 +116,35 @@ uv run geoextract serve api --scope bremen --port 8791
 # → http://127.0.0.1:8791/  (map)   http://127.0.0.1:8791/docs  (API)
 ```
 
-With docker (identical on a laptop, a VPS or an institute server; Caddy serves the static
-data with Range requests and gets TLS automatically for a hostname):
+With docker — locally the API serves everything itself:
 
 ```bash
 docker compose build                                  # serve-only image (≈ 220 MB of pulls)
 uv run geoextract serve build --scope bremen          # tiles on the host (tippecanoe installed)
-SCOPE=bremen docker compose up -d                     # http://localhost/
-# server without tippecanoe on the host: build the "full" image and let the builder make tiles
-IMAGE_TARGET=full docker compose build                # + tippecanoe compiled in (≈ 450 MB)
-SCOPE=DE docker compose --profile build run --rm builder
-SITE_ADDRESS=companies.example.org SCOPE=DE docker compose up -d   # production, HTTPS
+SCOPE=bremen docker compose up -d                     # http://127.0.0.1:8791/
+```
+
+On a server the API runs behind the **shared Caddy stack** (`~/Workspace/server-proxy`,
+deployed to `/opt/proxy`), which owns 80/443 for every app on the box, terminates TLS,
+applies the outer basic-auth, and serves `data/serve/<SCOPE>/current/` as static files
+(PMTiles need HTTP Range). This compose file only runs the API; it joins the external
+docker network `proxy` as `geo-api`.
+
+```bash
+# once, on the server: the builder needs tippecanoe compiled in
+IMAGE_TARGET=full docker compose build                # ≈ 450 MB, ~10 min
+SCOPE=bremen docker compose --profile build run --rm builder
+SCOPE=bremen docker compose up -d
 ```
 
 Ship a new data version to a server without moving tiles (they are built there):
 
 ```bash
-scripts/serve_push.sh user@host:/srv/geo-company DE   # rsync inputs (~0.7 GB) + remote build
+scripts/serve_push.sh root@badserver1:/opt/geo-company bremen   # rsync inputs + remote build
 ```
+
+The script uploads only the inputs of `serve build` for that scope (Bremen ≈ 16 MB,
+DE ≈ 0.7 GB), runs the builder there, and flips the `current` symlink.
 
 ## Licences and attribution
 
