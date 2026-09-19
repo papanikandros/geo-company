@@ -3,6 +3,7 @@
 #
 #   scripts/serve_push.sh user@host:/path/to/geo-company [SCOPE]
 #   scripts/serve_push.sh root@badserver1:/opt/geo-company bremen
+#   PUSH_BUILT=1 scripts/serve_push.sh badserver1:/opt/geo-company bremen   (see below)
 #
 # Copies ONLY the inputs of `geoextract serve build` for THAT SCOPE with rsync
 # (resumable, checksummed), then runs the builder container on the target, which writes
@@ -10,6 +11,11 @@
 # uploaded: they are built where they are served. Nothing is deleted on the target.
 #
 # Env:
+#   PUSH_BUILT=1            push the FINISHED version directory built here instead of the
+#                           build inputs, and only switch `current` on the target. Use this
+#                           when the target has no per-source parquets (665 MB for Bremen,
+#                           much more DE-wide): the nested "full" tier and the card's raw
+#                           records are complete only where those sources exist.
 #   PUSH_SOURCES=0          skip the per-source parquets (src_*). The build still
 #                           succeeds; company records lose their nested per-source
 #                           detail (tier "full" / GET /v1/companies/{id}).
@@ -27,6 +33,25 @@ REMOTE_DIR=${TARGET#*:}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DATA=${GEOEXTRACT_DATA_DIR:-$ROOT/data}
 PUSH_SOURCES=${PUSH_SOURCES:-1}
+PUSH_BUILT=${PUSH_BUILT:-0}
+CONTAINER_UID_DEFAULT=10001
+
+if [ "$PUSH_BUILT" = "1" ]; then
+  VERSION=$(readlink "$DATA/serve/$SCOPE/current" || true)
+  [ -n "$VERSION" ] || { echo "no $DATA/serve/$SCOPE/current — run: geoextract serve build --scope $SCOPE"; exit 1; }
+  SRC="$DATA/serve/$SCOPE/$VERSION"
+  echo "== pushing the built version $SCOPE/$VERSION ($(du -sh "$SRC" | cut -f1)) to $TARGET"
+  ssh "$HOST" "mkdir -p '$REMOTE_DIR/data/serve/$SCOPE'"
+  rsync -a --info=progress2 --partial --checksum "$SRC/" "$TARGET/data/serve/$SCOPE/$VERSION.incoming/"
+  # switch only when the transfer is complete: rename, repoint `current`, keep the old version
+  ssh "$HOST" "cd '$REMOTE_DIR/data/serve/$SCOPE' && rm -rf '$VERSION.old' && \
+    { [ -d '$VERSION' ] && mv '$VERSION' '$VERSION.old' || true; } && mv '$VERSION.incoming' '$VERSION' && \
+    ln -sfn '$VERSION' current && chown -R ${CONTAINER_UID:-$CONTAINER_UID_DEFAULT}:${CONTAINER_UID:-$CONTAINER_UID_DEFAULT} '$VERSION' current 2>/dev/null || true; \
+    ls -la current && du -sh '$VERSION'"
+  echo "== done. Restart the API on the target — it holds the parquet files open:"
+  echo "   ssh $HOST 'cd $REMOTE_DIR && docker compose restart api'"
+  exit 0
+fi
 
 # The serve image runs as an unprivileged user (Dockerfile: useradd -u 10001), so the
 # bind-mounted data dir must belong to it — a fresh checkout's is root-owned and the

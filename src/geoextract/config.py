@@ -515,6 +515,11 @@ SERVE_EXTRA_PUBLIC = ["website_kind", "website_host", "website_listing", "websit
                       "hr_name", "hr_matched_name", "register_score", "hr_candidates",
                       "wd_id", "wd_operator_id", "wd_brand_id", "wd_website", "wd_industry", "wd_lei",
                       "wd_legal_form", "wd_parent", "wd_inception", "wd_dissolved",
+                      "website_replaced", "website_replaced_source",
+                      # the evidence behind every website value (stage 1 imprint extraction)
+                      "website_verified", "website_verified_at", "website_score",
+                      "imp_legal_name", "imp_legal_form", "imp_court", "imp_register_type", "imp_register_no",
+                      "imp_registration", "imp_vat_id", "imp_street", "imp_plz", "imp_city", "imp_score", "imp_url",
                       "member_ids"]                 # debug columns that ARE public (tier 1)
 # columns of a raw source record that are merge bookkeeping, not the source's own data
 SERVE_RAW_DROP = {"email", "geometry", "source", "source_count", "confidence_score",

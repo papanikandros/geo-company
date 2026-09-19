@@ -60,6 +60,8 @@ COMPANY_COLUMNS: dict[str, tuple[str, bool, str]] = {
     "hr_objective": ("string", True, "Unternehmensgegenstand (registered business purpose) — Part C evidence"),
     "hr_capital": ("Float64", True, "registered capital (EUR) where the register has it"),
     "legal_name": ("string", True, "legal name as written in the site's Impressum (stage 1), else the register's"),
+    "website_replaced": ("string", True, "the UNVERIFIED website a discovery route replaced (audit trail)"),
+    "website_replaced_source": ("string", True, "where that replaced website had come from"),
 }
 
 CONTRACT_ORDER = list(COMPANY_COLUMNS)
