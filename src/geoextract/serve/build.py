@@ -267,17 +267,22 @@ def _write_tile_features(con: duckdb.DuckDBPyConnection, merged: Path, sites: Pa
                 fh.write(json.dumps(feat, ensure_ascii=False, separators=(",", ":"), default=str) + "\n")
                 counts["wikidata"] += 1
         if register_only is not None and register_only.exists():   # stage 4 register-only companies
-            ro = gpd.read_parquet(register_only)
+            # every ACTIVE register company that could be geocoded goes in (1.36 M DE-wide);
+            # dissolved ones and those without a usable address stay in the download only
+            cols = ["hr_id", "name", "hr_source", "legal_form", "hr_registration", "hr_geocode_method",
+                    "hr_industrial", "objective", "status", "geometry"]
+            ro = gpd.read_parquet(register_only, columns=cols)
             ro = ro[ro.geometry.notna() & (ro["status"] == "active")]
-            for _, r in ro.iterrows():
-                props = {"id": r["hr_id"], "name": r.get("name"), "src": r.get("hr_source"),
-                         "lf": r.get("legal_form"), "reg": r.get("hr_registration"),
-                         "geo": r.get("hr_geocode_method"), "ind": 1 if r.get("hr_industrial") else 0}
-                obj = r.get("objective")
-                if isinstance(obj, str) and obj:
-                    props["obj"] = obj[:240]
+            for r in ro.itertuples(index=False):
+                props = {"id": r.hr_id, "name": r.name, "src": r.hr_source, "lf": r.legal_form,
+                         "reg": r.hr_registration, "geo": r.hr_geocode_method,
+                         "ind": 1 if r.hr_industrial else 0}
+                if isinstance(r.objective, str) and r.objective:
+                    props["obj"] = r.objective[:240]
                 props = {k: v for k, v in props.items() if v is not None and v is not pd.NA}
-                feat = {"type": "Feature", "tippecanoe": {"layer": "register", "minzoom": config.SERVE_TILE_MINZOOM},
+                zoom = (config.SERVE_TILE_REGISTER_INDUSTRIAL_MINZOOM if r.hr_industrial
+                        else config.SERVE_TILE_REGISTER_MINZOOM)
+                feat = {"type": "Feature", "tippecanoe": {"layer": "register", "minzoom": zoom},
                         "geometry": {"type": "Point", "coordinates": [float(r.geometry.x), float(r.geometry.y)]},
                         "properties": props}
                 fh.write(json.dumps(feat, ensure_ascii=False, separators=(",", ":"), default=str) + "\n")
@@ -422,13 +427,17 @@ def build_ui_model(con: duckdb.DuckDBPyConnection, merged: Path, version: str,
 
 def build_tiles(features: Path, out: Path) -> None:
     cmd = ["tippecanoe", "-o", str(out), "--force", "-Z", str(config.SERVE_TILE_MINZOOM),
-           "-z", str(config.SERVE_TILE_MAXZOOM), "--drop-densest-as-needed",
-           "--extend-zooms-if-still-dropping", "--no-tile-size-limit",
+           "-z", str(config.SERVE_TILE_MAXZOOM),
+           # a tile that would burst its budget loses its densest points — that happens at
+           # low zoom, where overlapping dots are invisible anyway; from the full-detail
+           # zoom upward every feature survives. Without the cap the zoom-4 tiles held all
+           # 4.1 M points at 61 MB each and the map took a minute to show anything.
+           "--drop-densest-as-needed", "--extend-zooms-if-still-dropping",
+           "-M", str(config.SERVE_TILE_MAX_BYTES),
            "--full-detail", "13", "--low-detail", "10",
            "-r1", "--cluster-distance=0",
-           "--no-feature-limit", "--quiet", str(features)]
-    # keep every point from SERVE_TILE_ALLPOINTS_ZOOM upward: drop-densest only applies below
-    cmd += ["--preserve-input-order"]
+           "--preserve-input-order",
+           "--quiet", str(features)]
     subprocess.run(cmd, check=True)
 
 

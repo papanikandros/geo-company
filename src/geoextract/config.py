@@ -533,6 +533,18 @@ SERVE_TILE_MINZOOM = 4
 SERVE_TILE_MAXZOOM = 14
 SERVE_TILE_ALLPOINTS_ZOOM = 11                      # from here every point is kept
 SERVE_TILE_SITES_MINZOOM = 12
+# register-only companies are registered SEATS, not places of business: 1.36 M of them are
+# placeable DE-wide and 592 postcodes hold more than 500 each (formation agents, tax
+# advisers). They are drawn from a middle zoom so the country view stays readable; the
+# industrial ones by business purpose come in earlier because they are the completeness gap.
+# tile weight: the country view kept every one of 4.1 M points, which made the zoom-4 tiles
+# 61 MB each and the first paint slow. Tiles are capped again (tippecanoe drops the densest
+# points only where a tile would burst, i.e. at low zoom); from this zoom on nothing is
+# dropped, because the tiles are small enough by then.
+SERVE_TILE_MAX_BYTES = 500_000
+SERVE_TILE_FULL_DETAIL_ZOOM = 11
+SERVE_TILE_REGISTER_MINZOOM = 11
+SERVE_TILE_REGISTER_INDUSTRIAL_MINZOOM = 8
 SERVE_TILE_LANDUSE_MINZOOM = 10
 SERVE_TILE_POINT_PROPS = ["id", "name", "business_type", "source", "source_count",
                           "is_industrial", "nace_section", "state", "district_ags", "website",
