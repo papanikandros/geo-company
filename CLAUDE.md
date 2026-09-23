@@ -108,6 +108,11 @@ business emails only (GDPR).
 
 ## Status snapshot (2026-09-04 — details in Claude's project memory)
 
+- **Item 6 (register + website) DONE for DE 2026-09-20; served DE map live on badserver1**
+  (`companies.91-99-7-130.sslip.io`, basic auth, `GEO_SCOPE=DE`): 9 GB version, tiles
+  2 906 MB complete from z12 (2026-09-22), 4 139 625 points + 1 355 820 register companies +
+  601 034 site polygons; PfA potentials nested in the full tier. Push: `PUSH_BUILT=1
+  scripts/serve_push.sh badserver1:/opt/geo-company DE` then restart the api container.
 - A0–A5 + B1 (IED) + B2 (Abwärme/PfA) + B3 (Overture) + B5 (MaStR, B5.1 refactor) done:
   DE table **4 139 625 companies** (2026-09-04, after items 4 + 5), 5 sources, `is_industrial`
   ≈ 370 k. B4 (Foursquare) deferred as redundant.
@@ -264,8 +269,21 @@ needs its own go with the volume stated first (golden rule 3).
    top-1 0.94): residual 881 → 104 verified sites (12.3 %, ≈ 0.90 precision by hand; unquoted
    queries, 1 query/s — 4/s got the address blocked by Yahoo after ≈ 1 500 queries);
    industrial verified own site 705, register-matched 791 of 2 050 (`exact_hrb` 356). Open:
-   100-firm no-site sample. Next: the DE runs in
-   pipeline order (1 → 2 → Wikidata → 4 → 3b → 3c → 3d).
+   100-firm no-site sample.
+   **ITEM 6 COMPLETE FOR GERMANY 2026-09-17…20** (pipeline order 1 → 2 → 6c → 4 → 3b → 3c → 3d
+   → 1 again → 2 again). Imprint: 76 086 hosts, 57 278 with an imprint, register number on
+   38 288, legal name on 55 858. Register join: 4 139 625 rows → 468 994 matched (31 292 by
+   imprint number); Wikidata 12 220 items / 7.7 MB → 33 246 websites filled; reconciliation
+   2 412 153 register-only companies (1 530 839 active, 1 355 820 placeable, 43 238
+   industrial-active gap); guessing 247 346 DNS → 5 963 sites; Common Crawl 42 272 candidates
+   → 2 856 sites; search (register-backed subset 30 913 companies, ~80 000 queries) → 2 448
+   sites. **Industrial rows (256 879): website 129 063, imprint-verified 70 247, register-
+   matched 81 558, legal name 100 344, confirmed by ≥ 2 data layers 96 945.** Whole table:
+   468 994 register matches, 487 780 legal names.
+   Engine reality: all six free engines block one address within a day (Yahoo also SOFT-blocks
+   — status 200 with unrelated pages → `relevant()` check); rotation + cooldown + 15-min block
+   waits are in `web/search.py`. The remaining ~70 000 non-register-backed industrial rows
+   need a fresh address (the VPS).
    **6c Wikidata enrichment (user decision 2026-09-08, after the register join, plan §"item
    6c"):** the table already carries Q-ids (OSM wikidata 10 631 / operator:wikidata 37 809 /
    brand:wikidata 136 037 rows, Overture brands 33 438); fetch the ~45 k items (CC0, tens of
@@ -340,6 +358,44 @@ needs its own go with the volume stated first (golden rule 3).
      only on the residual. Evaluation on a hand-labelled real-text sample before writeback.
 9. **E1** tests / README / CI; then validation layers (sEEnergies/Hotmaps, Overture
    overlap stats, density QA) as time allows.
+   - [x] **PfA surface coverage (user todo 2026-09-17) — ANSWERED 2026-09-20:** DE 5 928 PfA
+         companies, 4 231 (71 %) with a surface, of which only 595 from their own polygon and
+         3 636 from the containing landuse zone; Bremen 47 / 29 (62 %). PfA rows merged with
+         another source have one in 88 % of cases, PfA-only rows in 60 %. The workbook's
+         ~24 000 rows are waste-heat POTENTIALS (23 936), aggregated to 6 178 sites — not a bug.
+   - [ ] **Surface coverage as a core field (user decision 2026-09-20):** raise it beyond the
+         71 % above. (a) buildings / `man_made=works` / plant polygons from the state extracts
+         as a SECOND donor after the own polygon and before the landuse zone (a zone area is
+         an estate, i.e. an upper bound); (b) the address index of the reconciliation for
+         points whose street + number hit a building; (c) `grounds_area_source` must name the
+         donor kind and keep its id so a reader can tell a plant from an industrial park.
+         Offline, ≈ 1 h for DE (geography stage re-run on the existing tables).
+   - [ ] **Ranker training properly (user decision 2026-09-20 — deferred):** the active model
+         (`web/search_model.joblib`, 2026-09-20) was trained on the only 2 649 verified
+         companies whose queries are cached, and 1 452 of those got their site from the search
+         itself — it learns from its own successes. Unbiased comparison on Bremen (never
+         trained on): German model top-1 0.944 / p≥0.5 0.950; on German companies outside
+         Bremen it beats the Bremen model 0.914 vs 0.882 and fires above the threshold for
+         92 % vs 58 % of companies. Proper training needs ~3 000 of the 67 000 verified
+         companies that were NEVER searched (their sites come from tags/Overture): ≈ 10 000
+         queries, 3–4 h, from an address the engines still answer (not this machine — all six
+         free engines block it). Go deeper then: feature set, threshold, per-region models.
+         `web/search_model_bremen.joblib` is kept as the fallback.
+   - [x] **All dots at high zoom — DONE 2026-09-22:** three tippecanoe passes joined with
+         tile-join (`build_tiles`): overview z4–11 under `SERVE_TILE_MAX_BYTES` 500 KB, company
+         layers z12–15 with no limit (`SERVE_TILE_COMPLETE_FROM` 12), register seats in their
+         own pass under 250 KB; every pass has a FIXED zoom range (no
+         `--extend-zooms-if-still-dropping` — with three passes it diverged and left z15 with
+         register dots only). Checked by id in Berlin/Hamburg/Ruhr: 0 missing at z12–15.
+         Archive 1 233 → 2 906 MB; largest city tile 4.8 MB (z12). Live on badserver1.
+   - [x] **PfA per-potential fields on the map — DONE 2026-09-22 (user decision: nested only,
+         German keys, texts as reported):** `abwaerme.write_potentials` → 
+         `src_abwaerme/abwaerme_potentials_DE.parquet` (23 936 rows, every sheet column incl.
+         the 12 `leistungsprofil_<monat>_kw`), nested as `potentials` inside each abwaerme
+         raw record in the full tier (DE: 5 928 companies / 23 487 potentials; 449 belong to
+         un-geocoded sites); card shows each potential + a 12-bar profile; e-mail dropped.
+         Data caveat: the sheet says kW, but ~3 265 reporters entered monthly kWh (12 values
+         sum to the yearly figure) — passed through unchanged.
 10. **Later: deployment of the merged table to Cloudflare KV** (user idea 2026-09-04) — serve
    the company data from an edge key-value store so the map/API reads are ultra fast.
    Think through first: key design (per company id vs. per grid cell / district tiles),
