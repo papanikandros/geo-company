@@ -251,12 +251,16 @@ def wikidata_only(con: duckdb.DuckDBPyConnection, merged: Path, items: Path) -> 
 
 def _write_tile_features(con: duckdb.DuckDBPyConnection, merged: Path, sites: Path | None,
                          landuse: list[Path], out: Path, register_only: Path | None = None,
-                         wd_only: pd.DataFrame | None = None) -> dict[str, int]:
+                         wd_only: pd.DataFrame | None = None, out_register: Path | None = None) -> dict[str, int]:
     """GeoJSON text sequence (one feature per line) with per-feature tippecanoe layer/zoom.
     Points come from the MERGED table (internal debug columns feed the display groups);
     the tiles are a rendering product, not a download."""
     counts = {"points": 0, "sites": 0, "landuse": 0, "register": 0, "wikidata": 0}
     bt_of: dict[str, str] = {}
+    # the register-only companies are written separately: they are the bulk of a city tile
+    # (Hamburg zoom 12 before the split: 7.7 MB of 11.2 MB) and they are registered SEATS,
+    # so they keep a byte budget while the company dots are built complete
+    reg_fh = open(out_register, "w", encoding="utf8") if out_register is not None else None
     with open(out, "w", encoding="utf8") as fh:
         if wd_only is not None and len(wd_only):   # item 6c wikidata-only companies
             for r in wd_only.to_dict("records"):
@@ -285,7 +289,7 @@ def _write_tile_features(con: duckdb.DuckDBPyConnection, merged: Path, sites: Pa
                 feat = {"type": "Feature", "tippecanoe": {"layer": "register", "minzoom": zoom},
                         "geometry": {"type": "Point", "coordinates": [float(r.geometry.x), float(r.geometry.y)]},
                         "properties": props}
-                fh.write(json.dumps(feat, ensure_ascii=False, separators=(",", ":"), default=str) + "\n")
+                (reg_fh or fh).write(json.dumps(feat, ensure_ascii=False, separators=(",", ":"), default=str) + "\n")
                 counts["register"] += 1
         for lon, lat, p in _iter_points(con, merged):
             if p.get("poly") and p.get("bt"):
@@ -319,6 +323,8 @@ def _write_tile_features(con: duckdb.DuckDBPyConnection, merged: Path, sites: Pa
                         "geometry": geom.__geo_interface__, "properties": {"landuse": str(typ)}}
                 fh.write(json.dumps(feat, separators=(",", ":")) + "\n")
                 counts["landuse"] += 1
+    if reg_fh is not None:
+        reg_fh.close()
     return counts
 
 
@@ -425,20 +431,48 @@ def build_ui_model(con: duckdb.DuckDBPyConnection, merged: Path, version: str,
             "sectors": sectors, "sector_column": config.SERVE_SECTOR_COLUMN}
 
 
-def build_tiles(features: Path, out: Path) -> None:
-    cmd = ["tippecanoe", "-o", str(out), "--force", "-Z", str(config.SERVE_TILE_MINZOOM),
-           "-z", str(config.SERVE_TILE_MAXZOOM),
-           # a tile that would burst its budget loses its densest points — that happens at
-           # low zoom, where overlapping dots are invisible anyway; from the full-detail
-           # zoom upward every feature survives. Without the cap the zoom-4 tiles held all
-           # 4.1 M points at 61 MB each and the map took a minute to show anything.
-           "--drop-densest-as-needed", "--extend-zooms-if-still-dropping",
-           "-M", str(config.SERVE_TILE_MAX_BYTES),
-           "--full-detail", "13", "--low-detail", "10",
-           "-r1", "--cluster-distance=0",
-           "--preserve-input-order",
-           "--quiet", str(features)]
-    subprocess.run(cmd, check=True)
+def build_tiles(features: Path, out: Path, register_features: Path | None = None) -> None:
+    """Up to three tippecanoe passes, joined into one archive.
+
+    Overview (SERVE_TILE_MINZOOM … SERVE_TILE_COMPLETE_FROM - 1): a tile that would burst
+    SERVE_TILE_MAX_BYTES loses its densest points. Thousands of dots share a pixel there, so
+    the loss is invisible — and without it the zoom-4 tiles held all 4.1 M points at 61 MB
+    each and the map showed nothing for a minute.
+
+    Detail (SERVE_TILE_COMPLETE_FROM … SERVE_TILE_MAXZOOM): no byte limit, no feature limit,
+    no dropping — zoomed in, EVERY company dot is there. Measured before the split: a Berlin
+    tile carried 20 % of its companies at zoom 12 and 57 % at 13.
+
+    The register-only companies are built separately and keep a budget at every zoom: they
+    are registered seats, several hundred of them share one address, and they made up two
+    thirds of a city tile (Hamburg zoom 12: 7.7 MB of 11.2 MB).
+    """
+    base = ["--full-detail", "13", "--low-detail", "10", "-r1", "--cluster-distance=0",
+            "--preserve-input-order", "--quiet"]
+    complete_from = max(config.SERVE_TILE_COMPLETE_FROM, config.SERVE_TILE_MINZOOM)
+    parts: list[Path] = []
+    low, high, reg = (out.with_suffix(f".{n}.mbtiles") for n in ("low", "high", "reg"))
+    try:
+        subprocess.run(["tippecanoe", "-o", str(low), "--force",
+                        "-Z", str(config.SERVE_TILE_MINZOOM), "-z", str(complete_from - 1),
+                        "--drop-densest-as-needed",
+                        "-M", str(config.SERVE_TILE_MAX_BYTES), *base, str(features)], check=True)
+        parts.append(low)
+        subprocess.run(["tippecanoe", "-o", str(high), "--force",
+                        "-Z", str(complete_from), "-z", str(config.SERVE_TILE_MAXZOOM),
+                        "--no-tile-size-limit", "--no-feature-limit", *base, str(features)], check=True)
+        parts.append(high)
+        if register_features is not None and register_features.exists() and register_features.stat().st_size:
+            subprocess.run(["tippecanoe", "-o", str(reg), "--force",
+                            "-Z", str(config.SERVE_TILE_MINZOOM), "-z", str(config.SERVE_TILE_MAXZOOM),
+                            "--drop-densest-as-needed",
+                            "-M", str(config.SERVE_TILE_REGISTER_MAX_BYTES), *base,
+                            str(register_features)], check=True)
+            parts.append(reg)
+        subprocess.run(["tile-join", "-f", "-o", str(out), "-pk", "-pC", *[str(p) for p in parts]], check=True)
+    finally:
+        for p in (low, high, reg):
+            p.unlink(missing_ok=True)
 
 
 # --- main build --------------------------------------------------------------------------
@@ -612,11 +646,14 @@ def build(data_root: Path, scope: str, version: str | None = None, tiles: bool =
             landuse = [paths.landuse_parquet(data_root, name_to_slug[st]) for st in states
                        if st in name_to_slug and paths.landuse_parquet(data_root, name_to_slug[st]).exists()]
             features = out / "features.geojsonl"
+            features_reg = out / "features_register.geojsonl"
             tile_counts = _write_tile_features(con, merged, sites, landuse, features,
                                                register_only_parquet(data_root, scope),
-                                               wikidata_only(con, merged, wikidata_items_parquet(data_root)))
-            build_tiles(features, pmtiles)
+                                               wikidata_only(con, merged, wikidata_items_parquet(data_root)),
+                                               out_register=features_reg)
+            build_tiles(features, pmtiles, features_reg)
             features.unlink()
+            features_reg.unlink(missing_ok=True)
             print(f"[serve] tiles: {tile_counts} → {pmtiles.name} "
                   f"({pmtiles.stat().st_size / 1e6:.0f} MB, {time.time() - t0:.0f} s)")
         else:

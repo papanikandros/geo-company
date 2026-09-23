@@ -530,7 +530,8 @@ SERVE_SOURCE_PREFIXES = {"osm": "osm_", "ied": "ied_", "abwaerme": "abw_", "mast
 SERVE_SECTOR_COLUMN = "business_type"               # until Part C: nace_section
 SERVE_ROW_GROUP = 100_000
 SERVE_TILE_MINZOOM = 4
-SERVE_TILE_MAXZOOM = 14
+SERVE_TILE_MAXZOOM = 15     # explicit: earlier builds reached 15 only because tippecanoe
+                            # extended the zoom range on its own when it was still dropping
 SERVE_TILE_ALLPOINTS_ZOOM = 11                      # from here every point is kept
 SERVE_TILE_SITES_MINZOOM = 12
 # register-only companies are registered SEATS, not places of business: 1.36 M of them are
@@ -542,6 +543,12 @@ SERVE_TILE_SITES_MINZOOM = 12
 # points only where a tile would burst, i.e. at low zoom); from this zoom on nothing is
 # dropped, because the tiles are small enough by then.
 SERVE_TILE_MAX_BYTES = 500_000
+# From this zoom upward NOTHING is dropped: the tiles are built in two passes (overview with
+# the byte budget, detail without any limit) and joined. Measured before the split on the DE
+# build: a Berlin tile held 11 % of its companies at zoom 10, 20 % at 12, 57 % at 13 and
+# everything only from 14 — a district view was missing half its dots.
+SERVE_TILE_COMPLETE_FROM = 12
+SERVE_TILE_REGISTER_MAX_BYTES = 250_000    # the register layer keeps a budget at every zoom
 SERVE_TILE_FULL_DETAIL_ZOOM = 11
 SERVE_TILE_REGISTER_MINZOOM = 11
 SERVE_TILE_REGISTER_INDUSTRIAL_MINZOOM = 8
