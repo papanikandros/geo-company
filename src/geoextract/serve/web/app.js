@@ -430,6 +430,21 @@
         return "<div><b>" + esc(tech) + "</b> (" + units.length + " unit" + (units.length === 1 ? "" : "s") + ")" + lines + "</div>";
       }).join("");
     }
+    var MONTHS = ["januar", "februar", "maerz", "april", "mai", "juni", "juli", "august", "september", "oktober", "november", "dezember"];
+    function potentialsHtml(pots) {   // the waste-heat potentials of a site: every workbook field + the monthly profile
+      return pots.map(function (pt, i) {
+        var vals = MONTHS.map(function (m) { return pt["leistungsprofil_" + m + "_kw"]; });
+        var nums = vals.filter(function (v) { return typeof v === "number"; }), max = Math.max.apply(null, nums.concat([0]));
+        var bars = nums.length ? "<div class='profile'>" + vals.map(function (v, j) {
+          var h = (typeof v === "number" && max > 0) ? Math.max(2, Math.round(28 * v / max)) : 0;
+          return "<span class='bar' title='" + esc(MONTHS[j] + ": " + fmt(v) + " kW") + "' style='height:" + h + "px'></span>";
+        }).join("") + "<span class='k'> Leistungsprofil Jan–Dez (kW): " + esc(vals.map(fmt).join(" · ")) + "</span></div>" : "";
+        var rest = Object.keys(pt).filter(function (k) { return k.indexOf("leistungsprofil_") !== 0; })
+          .reduce(function (o, k) { o[k] = pt[k]; return o; }, {});
+        return "<div class='rec'><span class='k'>Potential " + (i + 1) + "/" + pots.length + " " + esc(pt.abwaermepotential || "") + "</span>" +
+          fieldsHtml(rest, ["abwaermepotential"]) + bars + "</div>";
+      }).join("");
+    }
     function first(rec, key) { return Array.isArray(rec[key]) && rec[key].length ? rec[key][0] : null; }
     function summaryHtml(rec) {   // the preview's hover card, field for field (+ register / wikidata verdict lines)
       var lines = ["<b>name:</b> " + nameHtml(rec)];
@@ -452,6 +467,8 @@
       if (abw) {
         if (abw.abw_heat_mwh_a != null) lines.push("<b>abw_heat_mwh_a:</b> " + fmt(abw.abw_heat_mwh_a));
         if (abw.abw_temp_c != null) lines.push("<b>abw_temp_c:</b> " + fmt(abw.abw_temp_c));
+        var np = rec.abwaerme.reduce(function (n, a) { return n + (Array.isArray(a.potentials) ? a.potentials.length : 0); }, 0);
+        if (np) lines.push("<b>abw_potentials:</b> " + np + " (monthly profile in the raw record)");
       }
       var ovt = first(rec, "overture"); if (ovt && ovt.ovt_confidence != null) lines.push("<b>ovt_confidence:</b> " + fmt(ovt.ovt_confidence));
       var html = lines.join("<br>");
@@ -472,6 +489,7 @@
         return skip.indexOf(k) < 0 && rec[k] !== null && rec[k] !== undefined && rec[k] !== "" && k !== "latitude" && k !== "longitude";
       }).map(function (k) {
         if (k === "mastr_tech_detail") return "<div><span class='k'>" + esc(k) + ":</span>" + techLines(rec[k]) + "</div>";
+        if (k === "potentials" && Array.isArray(rec[k])) return "<div><span class='k'>potentials (" + rec[k].length + "):</span>" + potentialsHtml(rec[k]) + "</div>";
         if (k === "website" || k === "website_listing") {
           return "<div><span class='k'>" + esc(k) + ":</span> <a class='pv-link' href='" + esc(webUrl(rec[k])) + "' target='_blank' rel='noopener'>" + esc(rec[k]) + "</a></div>";
         }

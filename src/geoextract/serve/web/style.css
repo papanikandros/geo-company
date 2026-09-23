@@ -72,6 +72,9 @@ html, body {margin: 0; height: 100%; font: 12px sans-serif; color: #222; overflo
 .card .rec {margin: 2px 0 4px 8px; padding-left: 6px; border-left: 2px solid #eee}
 .card .k {color: #666}
 .card .units {margin-left: 14px; color: #444}
+.card .profile {margin: 3px 0 2px 0; display: flex; align-items: flex-end; gap: 2px; flex-wrap: wrap}
+.card .profile .bar {display: inline-block; width: 9px; background: #d9534f; border-radius: 1px}
+.card .profile .k {flex-basis: 100%; font-size: 90%}
 .hover .maplibregl-popup-content {padding: 4px 8px; background: rgba(255,255,255,.96); pointer-events: none}
 
 #extracts {position: fixed; top: 60px; left: 60px; width: 560px; max-height: 70vh; overflow: auto; background: #fff;

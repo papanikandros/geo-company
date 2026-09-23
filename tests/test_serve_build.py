@@ -7,6 +7,7 @@ import pyarrow.parquet as pq
 import pytest
 from shapely.geometry import Point, Polygon
 
+from geoextract.sources import abwaerme
 from geoextract import paths, schema
 from geoextract.serve import build
 
@@ -42,6 +43,10 @@ def data_root(tmp_path):
              "source": "abwaerme"},
     ], {"abw_heat_mwh_a": [1234.0], "abw_site_name": ["Weser Stahl Werk"]})
     abw.to_parquet(paths.source_parquet(tmp_path, "abwaerme", "DE"))
+    pd.DataFrame({"site_id": ["abw_9", "abw_9"], "melde_id": pd.array([2, 1], dtype="Int64"),
+                  "abwaermepotential": ["Abgas", "Kühlturm"], "email": ["x@y.de", None],
+                  "leistungsprofil_januar_kw": [200.0, 100.0], "verfuegbarkeit": [None, "5 Tage 24 Std"]}
+                 ).to_parquet(abwaerme.potentials_parquet(tmp_path), index=False)
     mastr = _gdf([
         {"id": "mastr_A1_L1", "name": "Weser Stahl GmbH", "business_type": "power", "state": "Bremen",
              "district": "Bremen", "district_ags": "04011", "geometry": Point(LON + 0.0004, LAT + 0.0004),
@@ -92,6 +97,10 @@ def test_build_layout_and_tiers(data_root, capsys):
     row = full.set_index("id").loc["osm_way/1"]
     assert len(row["mastr"]) == 2 and {r["id"] for r in row["mastr"]} == {"mastr_A1_L1", "mastr_A1_L2"}
     assert row["abwaerme"][0]["abw_heat_mwh_a"] == 1234.0
+    pots = row["abwaerme"][0]["potentials"]                 # every workbook field, ordered by report id
+    assert [p["abwaermepotential"] for p in pots] == ["Kühlturm", "Abgas"]
+    assert pots[1]["leistungsprofil_januar_kw"] == 200.0 and "email" not in pots[0]
+    assert pots[0]["verfuegbarkeit"] == "5 Tage 24 Std"
     assert row["osm"][0]["osm_tags"] == '{"industrial":"factory"}'
     assert "email" not in row["osm"][0] and "confidence_score" not in row["osm"][0]
     single = full.set_index("id").loc["osm_node/2"]
@@ -113,7 +122,7 @@ def test_build_layout_and_tiers(data_root, capsys):
     search = pd.read_parquet(out / "search.parquet")
     assert search.set_index("id").loc["osm_way/1", "name_key"] == "weser stahl"
     m = json.loads((out / "manifest.json").read_text())
-    assert m["companies"] == 3 and m["nested_sources"] == {"osm": 2, "abwaerme": 1, "mastr": 2}
+    assert m["companies"] == 3 and m["nested_sources"] == {"osm": 2, "abwaerme": 1, "abwaerme_potentials": 2, "mastr": 2}
     assert "email" in m["excluded"] and "companies_flat.parquet" in m["files"]
     assert m["files"]["companies_flat.parquet"]["sha256"]
     assert "ODbL" in m["licence"]["note"] or "derivative" in m["licence"]["note"]

@@ -38,6 +38,7 @@ import geopandas as gpd
 import pandas as pd
 
 from .. import config, paths
+from ..sources import abwaerme
 from ..resolve import normalize_name
 from ..schema import COMPANY_COLUMNS
 from . import groups
@@ -526,15 +527,34 @@ def build(data_root: Path, scope: str, version: str | None = None, tiles: bool =
         raw_sel = ", ".join(_q(c) for c in raw_cols)
         file_list = ", ".join(f"'{f}'" for f in files)
         prefix = config.SERVE_SOURCE_PREFIXES[key]
+        raw_src = f"(SELECT {raw_sel} FROM read_parquet([{file_list}], union_by_name = true))"
+        if key == "abwaerme":
+            # every workbook field of every waste-heat potential, nested under the site record
+            # (the site row itself holds only the sums)
+            pot = abwaerme.potentials_parquet(data_root)
+            if pot.exists():
+                pot_cols = [c for c in _columns(con, pot)
+                            if c not in config.SERVE_RAW_DROP and c != "site_id"]
+                pot_sel = ", ".join(f"{_q(c)} := {_q(c)}" for c in pot_cols)
+                con.execute(f"""
+                    CREATE TABLE pot AS
+                    SELECT site_id, list(struct_pack({pot_sel}) ORDER BY melde_id) AS potentials
+                    FROM read_parquet('{pot}') GROUP BY site_id""")
+                raw_src = f"""(SELECT s0.*, pot.potentials FROM {raw_src} s0
+                               LEFT JOIN pot ON pot.site_id = s0.id)"""
         con.execute(f"""
             CREATE TABLE nest_{key} AS
             SELECT m.company_id, list(s ORDER BY s.id) AS {_q(key)}
             FROM members m
-            JOIN (SELECT {raw_sel} FROM read_parquet([{file_list}], union_by_name = true)) s
+            JOIN {raw_src} s
               ON s.id = m.member_id
             WHERE m.member_id LIKE '{prefix}%'
             GROUP BY m.company_id""")
         counts[key] = con.execute(f"SELECT count(*) FROM nest_{key}").fetchone()[0]
+        if key == "abwaerme" and "pot.potentials" in raw_src:
+            counts["abwaerme_potentials"] = int(con.execute(f"""
+                SELECT coalesce(sum(list_sum(list_transform({_q(key)}, a -> len(a.potentials)))), 0)
+                FROM nest_{key}""").fetchone()[0])
         joins.append(f"LEFT JOIN nest_{key} ON nest_{key}.company_id = f.id")
         nested_cols.append(f"nest_{key}.{_q(key)}")
     # the register row behind hr_id (stage 2) and the Wikidata items behind wd_* (item 6c):

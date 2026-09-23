@@ -66,14 +66,14 @@ def test_extract_abwaerme_end_to_end(tmp_path, monkeypatch):
     xlsx = tmp_path / "pfa.xlsx"
     # write with the 2-row header shape the reader expects
     import openpyxl
-    frame = _potentials_frame()
+    frame = _full_workbook_frame()
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = config.ABWAERME_SHEET
     ws.append([None] * len(frame.columns))            # merged §17 header row
     ws.append(list(frame.columns))                     # real header
     for row in frame.itertuples(index=False):
-        ws.append(list(row))
+        ws.append([None if pd.isna(v) else v for v in row])
     wb.save(xlsx)
 
     from geoextract import download
@@ -82,6 +82,7 @@ def test_extract_abwaerme_end_to_end(tmp_path, monkeypatch):
     gdf = abwaerme.extract_abwaerme(tmp_path)
 
     assert len(gdf) == 2
+    assert len(pd.read_parquet(abwaerme.potentials_parquet(tmp_path))) == 3   # written alongside
     s = gdf[gdf["name"] == "Stahlwerke Bremen GmbH"].iloc[0]   # zero-width char stripped
     assert s["business_type"] is pd.NA or pd.isna(s["business_type"])  # stays null
     assert s["source"] == "abwaerme"
@@ -124,3 +125,43 @@ def test_coarse_geocode_confidence_capped():
     ])
     out = resolve.compute_confidence(gdf)
     assert out.iloc[0]["confidence_score"] <= config.GEOCODE_COARSE_CONFIDENCE_CAP
+
+def _full_workbook_frame():
+    """The two-site frame plus every other sheet column (monthly profile etc.)."""
+    df = _potentials_frame()
+    P = abwaerme.POTENTIAL_COLS
+    df[P["melde_id"]] = [11, 12, 21]
+    for key, header in P.items():
+        if header not in df.columns:
+            df[header] = [f"{key} {i}" for i in range(len(df))]
+    for m in abwaerme._MONTHS:
+        df[P[f"leistungsprofil_{m}_kw"]] = [100.0, 200.0, 50.0]
+    df[P["taegliche_verfuegbarkeit_h"]] = [24, 16, None]
+    return df
+
+
+def test_potentials_frame_keeps_every_workbook_field():
+    raw = _full_workbook_frame()
+    pots = abwaerme.potentials_frame(raw)
+    sites = abwaerme.aggregate_sites(raw)
+    assert len(pots) == 3 and set(abwaerme.POTENTIAL_COLS) <= set(pots.columns)
+    # keyed by the same site id the site row gets
+    site_ids = {abwaerme._site_id(r.uid, r.street, r.plz) for r in sites.itertuples()}
+    assert set(pots.site_id) == site_ids
+    assert (pots.site_id == pots.site_id.iloc[0]).sum() == 2          # two potentials, one site
+    assert list(pots.leistungsprofil_januar_kw) == [100.0, 200.0, 50.0]
+    assert pots.taegliche_verfuegbarkeit_h.isna().tolist() == [False, False, True]
+    assert pots.verfuegbarkeit.iloc[0] == "verfuegbarkeit 0"        # texts stay as reported
+    assert pots.melde_id.dtype == "Int64"
+
+
+def test_write_potentials_from_cached_workbook(tmp_path, monkeypatch):
+    from geoextract import paths
+    raw = _full_workbook_frame()
+    monkeypatch.setattr(abwaerme, "read_workbook", lambda xlsx: raw)
+    assert abwaerme.write_potentials(tmp_path) is None               # no workbook, no network
+    xlsx = paths.raw_dir(tmp_path) / "abwaerme" / "pfa_datentabelle.xlsx"
+    xlsx.parent.mkdir(parents=True, exist_ok=True); xlsx.write_bytes(b"")
+    dest = abwaerme.write_potentials(tmp_path)
+    assert dest == abwaerme.potentials_parquet(tmp_path) and dest.exists()
+    assert len(pd.read_parquet(dest)) == 3

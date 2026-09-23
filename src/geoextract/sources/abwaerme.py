@@ -13,6 +13,11 @@ Debug columns: abw_heat_mwh_a (sum), abw_power_kw (sum of max thermal power),
 abw_temp_c (heat-weighted mean), abw_potentials (count), abw_potential_names,
 abw_site_name, geocode_source, geocode_precision, dedup_anchor (False for
 postcode/city-precision rows — they must not anchor dedup, spec §B2).
+
+Per-potential table (2026-09-22): the site row keeps only sums, so every workbook
+field — the monthly load profile above all — is written one-to-one to
+``src_abwaerme/abwaerme_potentials_DE.parquet``, one row per workbook row, keyed by
+the site id (``site_id``). The serve build nests it into the site's raw record.
 """
 from __future__ import annotations
 
@@ -39,6 +44,81 @@ _COLS = {
     "email": "E-Mail-Adresse",
     "phone": "Telefonnummer",
 }
+
+
+# every column of the potentials sheet, in sheet order, under a German snake_case key;
+# the monthly load profile keeps the month names so a reader sees them without a legend
+_MONTHS = ["januar", "februar", "maerz", "april", "mai", "juni", "juli", "august",
+           "september", "oktober", "november", "dezember"]
+_MONTH_HEADERS = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August",
+                  "September", "Oktober", "November", "Dezember"]
+POTENTIAL_COLS = {
+    "unternehmens_id": "Unternehmens- ID",
+    "melde_id": "Melde- ID",
+    "firmenname": "Firmenname",
+    "standortname": "Standortname",
+    "strasse_hausnummer": "Straße und Hausnummer",
+    "plz": "PLZ",
+    "ort": "Ort",
+    "abwaermepotential": "Name des Abwärmepotentials",
+    "waermemenge_kwh_a": "Wärmemenge pro Jahr (in kWh/a)",
+    "max_thermische_leistung_kw": "Maximale thermische Leistung (in kW)",
+    "temperaturniveau_c": "Durchschnittliches Temperaturniveau (in °C)",
+    "temperaturbereich": "Temperaturbereich",
+    "taegliche_verfuegbarkeit_h": "Durchschnittliche tägl. Verfügbarkeit (in h)",
+    "verfuegbarkeit_wochenende": "Verfügbarkeit am Wochenende",
+    "verfuegbarkeit": "Verfügbarkeit",
+    "vorhersehbarkeit": "Vorhersehbarkeit der Verfügbarkeit",
+    "regelungsmoeglichkeiten": "Vorhandene Regelungsmöglichkeiten",
+    **{f"leistungsprofil_{m}_kw": f"Leistungsprofil {h} (in kW)"
+       for m, h in zip(_MONTHS, _MONTH_HEADERS)},
+    "ergaenzende_informationen": "Ergänzende Informationen zum Abwärmepotential",
+    "email": "E-Mail-Adresse",
+    "telefon": "Telefonnummer",
+    "weitere_hinweise": "Weitere Hinweise",
+}
+_POTENTIAL_NUMERIC = {"unternehmens_id", "melde_id", "waermemenge_kwh_a",
+                      "max_thermische_leistung_kw", "temperaturniveau_c",
+                      "taegliche_verfuegbarkeit_h"} | {f"leistungsprofil_{m}_kw" for m in _MONTHS}
+
+
+def potentials_parquet(data_root: Path) -> Path:
+    return paths.source_parquet(data_root, "abwaerme", "DE").parent / "abwaerme_potentials_DE.parquet"
+
+
+def potentials_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    """One row per workbook row with EVERY sheet column, keyed by the site id."""
+    missing = [v for v in POTENTIAL_COLS.values() if v not in raw.columns]
+    if missing:
+        raise KeyError(f"Abwärme workbook is missing potential columns: {missing}")
+    c = _COLS
+    out = pd.DataFrame({
+        "site_id": [_site_id(u, s, p) for u, s, p in
+                    zip(raw[c["uid"]], raw[c["street"]], raw[c["plz"]].astype(str).str.strip())],
+    })
+    for key, header in POTENTIAL_COLS.items():
+        col = raw[header]
+        if key in _POTENTIAL_NUMERIC:
+            num = pd.to_numeric(col, errors="coerce")
+            out[key] = pd.array(num, dtype="Int64") if key.endswith("_id") \
+                else pd.array(num, dtype="Float64")
+        else:
+            out[key] = col.astype("string").str.strip().replace({"": pd.NA, "nan": pd.NA})
+    return out
+
+
+def write_potentials(data_root: Path, raw: pd.DataFrame | None = None) -> Path | None:
+    """Write the per-potential table from the cached workbook (no network)."""
+    xlsx = paths.raw_dir(data_root) / "abwaerme" / "pfa_datentabelle.xlsx"
+    if raw is None:
+        if not xlsx.exists():
+            return None
+        raw = read_workbook(xlsx)
+    dest = potentials_parquet(data_root)
+    pots = potentials_frame(raw)
+    pots.to_parquet(dest, index=False)
+    print(f"[abwaerme] {len(pots)} potentials → {dest.name}")
+    return dest
 
 
 def _site_id(uid, street, plz) -> str:
@@ -107,12 +187,15 @@ def extract_abwaerme(data_root: Path, force: bool = False) -> gpd.GeoDataFrame:
     dest = paths.source_parquet(data_root, "abwaerme", "DE")
     if dest.exists() and not force:
         print(f"[skip] {dest.name} exists")
+        if not potentials_parquet(data_root).exists():
+            write_potentials(data_root)          # from the cached workbook, no download
         return gpd.read_parquet(dest)
 
     xlsx = download.download_file(
         config.ABWAERME_URL, paths.raw_dir(data_root) / "abwaerme" / "pfa_datentabelle.xlsx",
         force=force)
     raw = read_workbook(xlsx)
+    write_potentials(data_root, raw)
     sites = aggregate_sites(raw)
     print(f"[abwaerme] {len(raw)} potential rows → {len(sites)} sites "
           f"({sites['name'].nunique()} companies)")
