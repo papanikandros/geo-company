@@ -445,6 +445,19 @@
           fieldsHtml(rest, ["abwaermepotential"]) + bars + "</div>";
       }).join("");
     }
+    function rawHtml(rows) {   // verbatim source rows: grouped by record kind, every non-empty field
+      var groups = {};
+      rows.forEach(function (r) { (groups[r.record || "record"] = groups[r.record || "record"] || []).push(r); });
+      return Object.keys(groups).map(function (g) {
+        var rs = groups[g];
+        return "<details class='raw'><summary>" + esc(g) + (rs.length > 1 ? " (" + rs.length + ")" : "") + "</summary>" +
+          rs.map(function (r) {
+            var f = r.fields || {};
+            return "<div class='rec'>" + (r.key ? "<span class='k'>" + esc(r.key) + "</span>" : "") +
+              Object.keys(f).map(function (k) { return "<div><span class='k'>" + esc(k) + ":</span> " + fmt(f[k]) + "</div>"; }).join("") + "</div>";
+          }).join("") + "</details>";
+      }).join("");
+    }
     function first(rec, key) { return Array.isArray(rec[key]) && rec[key].length ? rec[key][0] : null; }
     function summaryHtml(rec) {   // the preview's hover card, field for field (+ register / wikidata verdict lines)
       var lines = ["<b>name:</b> " + nameHtml(rec)];
@@ -490,6 +503,14 @@
       }).map(function (k) {
         if (k === "mastr_tech_detail") return "<div><span class='k'>" + esc(k) + ":</span>" + techLines(rec[k]) + "</div>";
         if (k === "potentials" && Array.isArray(rec[k])) return "<div><span class='k'>potentials (" + rec[k].length + "):</span>" + potentialsHtml(rec[k]) + "</div>";
+        if (k === "raw" && Array.isArray(rec[k])) return "<div><span class='k'>source rows verbatim (" + rec[k].length + "):</span>" + rawHtml(rec[k]) + "</div>";
+        if (Array.isArray(rec[k]) && rec[k].length && typeof rec[k][0] === "object") {   // any other nested list
+          return "<div><span class='k'>" + esc(k) + " (" + rec[k].length + "):</span>" + rec[k].map(function (r, i) {
+            return "<div class='rec'><span class='k'>#" + (i + 1) + "</span>" + fieldsHtml(r, []) + "</div>"; }).join("") + "</div>";
+        }
+        if (rec[k] && typeof rec[k] === "object" && !Array.isArray(rec[k])) {   // a map / struct
+          return "<div><span class='k'>" + esc(k) + ":</span><div class='rec'>" + fieldsHtml(rec[k], []) + "</div></div>";
+        }
         if (k === "website" || k === "website_listing") {
           return "<div><span class='k'>" + esc(k) + ":</span> <a class='pv-link' href='" + esc(webUrl(rec[k])) + "' target='_blank' rel='noopener'>" + esc(rec[k]) + "</a></div>";
         }

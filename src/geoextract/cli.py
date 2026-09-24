@@ -56,6 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_reg_rec.add_argument("--scope", default="bremen", help='state (name/code) or "DE"')
     _add_common(p_reg_rec)
 
+    p_raw = sub.add_parser("raw", help="verbatim source records behind the map entities (rawrecords.py)")
+    raw_sub = p_raw.add_subparsers(dest="raw_cmd", required=True)
+    p_raw_build = raw_sub.add_parser("build", help="write <source>_raw_DE.parquet from the local raw data (offline)")
+    p_raw_build.add_argument("--sources", default="ied,mastr,register", help="comma-separated: ied, mastr, register")
+    _add_common(p_raw_build)
+
     p_wd = sub.add_parser("wikidata", help="item 6c: enrich the merged table from Wikidata items")
     wd_sub = p_wd.add_subparsers(dest="wd_cmd", required=True)
     p_wd_enrich = wd_sub.add_parser("enrich", help="fetch missing items (SPARQL, cached) and write wd_* columns")
@@ -147,6 +153,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         from .pipeline import run_all
         return run_all(scope=args.scope, sources=args.sources, data_dir=args.data_dir)
+    if args.command == "raw" and args.raw_cmd == "build":
+        from . import paths as _paths, rawrecords
+        written = rawrecords.build(_paths.data_root(args.data_dir),
+                                   [x.strip() for x in args.sources.split(",") if x.strip()])
+        for p in written:
+            print(f"[out] {p}")
+        return 0 if written else 1
     if args.command == "register" and args.register_cmd == "build":
         from . import paths as _paths
         from .register import build as register_build

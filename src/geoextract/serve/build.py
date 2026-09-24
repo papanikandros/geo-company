@@ -37,7 +37,7 @@ import duckdb
 import geopandas as gpd
 import pandas as pd
 
-from .. import config, paths
+from .. import config, paths, rawrecords
 from ..sources import abwaerme
 from ..resolve import normalize_name
 from ..schema import COMPANY_COLUMNS
@@ -528,6 +528,15 @@ def build(data_root: Path, scope: str, version: str | None = None, tiles: bool =
         file_list = ", ".join(f"'{f}'" for f in files)
         prefix = config.SERVE_SOURCE_PREFIXES[key]
         raw_src = f"(SELECT {raw_sel} FROM read_parquet([{file_list}], union_by_name = true))"
+        verb = rawrecords.raw_parquet(data_root, key)
+        if verb.exists():   # every source row verbatim, nested as `raw` (rawrecords.py)
+            con.execute(f"""
+                CREATE TABLE verb_{key} AS
+                SELECT id, list(struct_pack(record := record, key := key, fields := fields)
+                                ORDER BY record, key) AS raw
+                FROM read_parquet('{verb}') GROUP BY id""")
+            raw_src = f"""(SELECT s0.*, verb_{key}.raw FROM {raw_src} s0
+                           LEFT JOIN verb_{key} ON verb_{key}.id = s0.id)"""
         if key == "abwaerme":
             # every workbook field of every waste-heat potential, nested under the site record
             # (the site row itself holds only the sums)
@@ -551,6 +560,10 @@ def build(data_root: Path, scope: str, version: str | None = None, tiles: bool =
             WHERE m.member_id LIKE '{prefix}%'
             GROUP BY m.company_id""")
         counts[key] = con.execute(f"SELECT count(*) FROM nest_{key}").fetchone()[0]
+        if f"verb_{key}" in raw_src:   # verbatim rows nested in this scope
+            counts[f"{key}_raw"] = int(con.execute(f"""
+                SELECT coalesce(sum(list_sum(list_transform({_q(key)}, s -> coalesce(len(s.raw), 0)))), 0)
+                FROM nest_{key}""").fetchone()[0])
         if key == "abwaerme" and "pot.potentials" in raw_src:
             counts["abwaerme_potentials"] = int(con.execute(f"""
                 SELECT coalesce(sum(list_sum(list_transform({_q(key)}, a -> len(a.potentials)))), 0)
@@ -565,14 +578,28 @@ def build(data_root: Path, scope: str, version: str | None = None, tiles: bool =
         reg_cols = [c for c in _columns(con, reg_files[0])
                     if c not in {"name_key_full", "name_key_light", "street_key"}]
         file_list = ", ".join(f"'{f}'" for f in reg_files)
+        reg_src = f"(SELECT {', '.join(_q(c) for c in reg_cols)} FROM read_parquet([{file_list}], union_by_name = true))"
+        verb = paths.register_parquet(data_root, "register_raw")
+        if verb.exists():   # the register rows verbatim, histories included (rawrecords.py)
+            con.execute(f"""
+                CREATE TABLE verb_register AS
+                SELECT id, list(struct_pack(record := record, key := key, fields := fields)
+                                ORDER BY record, key) AS raw
+                FROM read_parquet('{verb}') GROUP BY id""")
+            reg_src = f"""(SELECT r0.*, verb_register.raw FROM {reg_src} r0
+                           LEFT JOIN verb_register ON verb_register.id = r0.hr_source || ':' || r0.hr_id)"""
         con.execute(f"""
             CREATE TABLE nest_register AS
             SELECT f.id AS company_id, list(r) AS register
             FROM read_parquet('{flat}') f
-            JOIN (SELECT {', '.join(_q(c) for c in reg_cols)} FROM read_parquet([{file_list}], union_by_name = true)) r
+            JOIN {reg_src} r
               ON r.hr_id = f.hr_id AND r.hr_source = f.hr_source
             GROUP BY f.id""")
         counts["register"] = con.execute("SELECT count(*) FROM nest_register").fetchone()[0]
+        if "verb_register" in reg_src:
+            counts["register_raw"] = int(con.execute("""
+                SELECT coalesce(sum(list_sum(list_transform(register, r -> coalesce(len(r.raw), 0)))), 0)
+                FROM nest_register""").fetchone()[0])
         joins.append("LEFT JOIN nest_register ON nest_register.company_id = f.id")
         nested_cols.append("nest_register.register")
     wd_items = wikidata_items_parquet(data_root) if data_root is not None else None
