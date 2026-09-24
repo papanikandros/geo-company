@@ -42,7 +42,9 @@ if [ "$PUSH_BUILT" = "1" ]; then
   SRC="$DATA/serve/$SCOPE/$VERSION"
   echo "== pushing the built version $SCOPE/$VERSION ($(du -sh "$SRC" | cut -f1)) to $TARGET"
   ssh "$HOST" "mkdir -p '$REMOTE_DIR/data/serve/$SCOPE'"
-  rsync -a --info=progress2 --partial --checksum "$SRC/" "$TARGET/data/serve/$SCOPE/$VERSION.incoming/"
+  # unchanged files are hard-linked from the live version instead of sent again
+  rsync -a --info=progress2 --partial --checksum --link-dest=../current \
+    "$SRC/" "$TARGET/data/serve/$SCOPE/$VERSION.incoming/"
   # switch only when the transfer is complete: rename, repoint `current`, keep the old version
   ssh "$HOST" "cd '$REMOTE_DIR/data/serve/$SCOPE' && rm -rf '$VERSION.old' && \
     { [ -d '$VERSION' ] && mv '$VERSION' '$VERSION.old' || true; } && mv '$VERSION.incoming' '$VERSION' && \
