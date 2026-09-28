@@ -84,9 +84,12 @@ def valid_session(token: str | None) -> bool:
 # --- throttling -------------------------------------------------------------------------
 
 def client_ip(headers, fallback: str) -> str:
-    """Real client address behind the shared Caddy proxy."""
+    """Real client address behind the shared Caddy proxy: the LAST X-Forwarded-For value.
+    Caddy appends the peer address to whatever the client sent, so the first value can be
+    anything the client chose — keying the throttle on it would let it pick a fresh
+    "address" per attempt."""
     fwd = headers.get("x-forwarded-for", "")
-    return fwd.split(",")[0].strip() if fwd else fallback
+    return fwd.split(",")[-1].strip() if fwd else fallback
 
 
 def lock_seconds_left(ip: str) -> int:

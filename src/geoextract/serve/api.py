@@ -478,6 +478,13 @@ def create_app(version_dir: Path) -> FastAPI:
     def healthz():
         return Response("ok", media_type="text/plain")
 
+    @app.get("/auth", include_in_schema=False)
+    def auth_check():
+        """Caddy asks here (forward_auth) before serving the static data under /data/*.
+        The gate middleware has already accepted the cookie or the bearer token by the
+        time this runs; without them it answered 401 / 303 itself."""
+        return Response(status_code=204)
+
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
     app.mount("/data", StaticFiles(directory=version_dir), name="data")
     return app
