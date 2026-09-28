@@ -25,7 +25,10 @@ plus the raw record of every source), download the listed rows as csv / parquet.
 one row per company (the contract columns), `full` = the same plus one nested column per
 source with that source's raw records. `sha256` per file is in `manifest.json`.
 
-**API** (interactive docs at `/docs`):
+**API** (interactive docs at `/docs`). If the deployment has a password set (see *Login
+gate*), a browser logs in once at `/login`; scripts send the password as a bearer token —
+note that `pandas.read_parquet(url)` and R's `read_parquet(url)` cannot send headers, so
+fetch to a file first (examples below).
 
 ```
 GET  /v1/companies?state=Bremen&sector=industrial&format=parquet&tier=full
@@ -46,10 +49,11 @@ rows; csv and parquet stream the whole selection.
 Python:
 
 ```python
-import pandas as pd
+import io, os, pandas as pd, requests
 url = "https://<host>/v1/companies?state=Bremen&industrial=true&format=parquet&tier=full"
-df = pd.read_parquet(url)                      # nested source columns come back as lists of dicts
-df["mastr"].dropna().iloc[0][0]["mastr_techs"]
+hdr = {"Authorization": f"Bearer {os.environ['GEO_PW']}"}     # omit when no password is set
+df = pd.read_parquet(io.BytesIO(requests.get(url, headers=hdr).content))
+df["mastr"].dropna().iloc[0][0]["mastr_techs"]                # nested source columns are lists of dicts
 ```
 
 DuckDB / SQL over a downloaded extract:
@@ -62,7 +66,10 @@ FROM 'bremen_is_industrial_full.parquet' WHERE abwaerme IS NOT NULL ORDER BY hea
 R:
 
 ```r
-library(arrow); df <- read_parquet("https://<host>/v1/companies?state=Bremen&format=parquet")
+library(arrow); library(httr)
+r <- GET("https://<host>/v1/companies?state=Bremen&format=parquet",
+         add_headers(Authorization = paste("Bearer", Sys.getenv("GEO_PW"))))
+df <- read_parquet(rawConnection(content(r, "raw")))
 ```
 
 ## Data contract
@@ -124,9 +131,30 @@ uv run geoextract serve build --scope bremen          # tiles on the host (tippe
 SCOPE=bremen docker compose up -d                     # http://127.0.0.1:8791/
 ```
 
+### Login gate
+
+One password per deployment, no username (`serve/auth.py`). Set `GEOEXTRACT_WEB_PASSWORD`
+in `.env` where the API runs; unset means the gate is off, which is what you want on a
+laptop. With it set, every route needs one of:
+
+* the session cookie a browser gets by posting the password to `/login`, or
+* the password as a bearer token, so scripts need no browser session:
+
+```bash
+curl -H "Authorization: Bearer $PW" "https://<host>/v1/companies?state=Bremen&format=parquet" -o bremen.parquet
+```
+
+```python
+requests.get(url, headers={"Authorization": f"Bearer {pw}"})
+```
+
+Failed attempts are throttled per client address: five failures in five minutes lock that
+address out for fifteen minutes, whether they came from the form or from a token. Set
+`GEOEXTRACT_WEB_SECRET` (`openssl rand -hex 32`) so sessions survive a restart.
+
 On a server the API runs behind the **shared Caddy stack** (`~/Workspace/server-proxy`,
 deployed to `/opt/proxy`), which owns 80/443 for every app on the box, terminates TLS,
-applies the outer basic-auth, and serves `data/serve/<SCOPE>/current/` as static files
+and serves `data/serve/<SCOPE>/current/` as static files
 (PMTiles need HTTP Range). This compose file only runs the API; it joins the external
 docker network `proxy` as `geo-api`.
 

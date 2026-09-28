@@ -26,17 +26,19 @@ import os
 import tempfile
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 
 import duckdb
 from fastapi import FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from starlette.middleware.cors import CORSMiddleware
 
 from .. import config
 from ..resolve import normalize_name
+from . import auth
 from .dev import WEB_DIR, _jsonable, latest_version
 
 MAX_JSON = 50_000
@@ -291,6 +293,64 @@ def create_app(version_dir: Path) -> FastAPI:
                               + store.manifest["licence"]["note"])
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST"], allow_headers=["*"])
     app.state.store = store
+
+    # --- single-password gate (serve/auth.py) -------------------------------------------
+    # OFF when GEOEXTRACT_WEB_PASSWORD is unset (local dev). When set, every route needs a
+    # session cookie (browser, via /login) or the password as a bearer token (scripts).
+    OPEN_PATHS = ("/login", "/healthz")
+
+    @app.middleware("http")
+    async def gate(request: Request, call_next):
+        if not auth.enabled() or request.url.path in OPEN_PATHS:
+            return await call_next(request)
+        if auth.valid_session(request.cookies.get(auth.COOKIE_NAME)):
+            return await call_next(request)
+        offered = auth.bearer_password(request.headers)
+        if offered:
+            ip = auth.client_ip(request.headers, request.client.host if request.client else "-")
+            left = auth.lock_seconds_left(ip)
+            if left:
+                return JSONResponse({"detail": f"too many failed attempts, retry in {left}s"},
+                                    status_code=429, headers={"Retry-After": str(left)})
+            if auth.check_password(offered, ip):
+                return await call_next(request)
+            return JSONResponse({"detail": "invalid password"}, status_code=401)
+        # browsers get the form; programmatic clients get 401 with the how-to
+        if "text/html" in request.headers.get("accept", ""):
+            return RedirectResponse("/login", status_code=303)
+        return JSONResponse(
+            {"detail": "authentication required: send 'Authorization: Bearer <password>'"},
+            status_code=401)
+
+    @app.get("/login", include_in_schema=False)
+    def login_form():
+        if not auth.enabled():
+            return RedirectResponse("/", status_code=303)
+        return HTMLResponse(auth.login_page())
+
+    @app.post("/login", include_in_schema=False)
+    async def login_submit(request: Request):
+        if not auth.enabled():
+            return RedirectResponse("/", status_code=303)
+        ip = auth.client_ip(request.headers, request.client.host if request.client else "-")
+        left = auth.lock_seconds_left(ip)
+        if left:
+            return HTMLResponse(auth.login_page(
+                f"Zu viele Fehlversuche. Erneut möglich in {left} Sekunden."), status_code=429)
+        # parse the urlencoded body with the stdlib: starlette's request.form() would
+        # pull in python-multipart for one field
+        fields = urllib.parse.parse_qs((await request.body()).decode("utf-8", "replace"))
+        if not auth.check_password((fields.get("password") or [""])[0], ip):
+            left = auth.lock_seconds_left(ip)
+            msg = (f"Zu viele Fehlversuche. Erneut möglich in {left} Sekunden."
+                   if left else "Falsches Passwort.")
+            return HTMLResponse(auth.login_page(msg), status_code=401)
+        resp = RedirectResponse("/", status_code=303)
+        resp.set_cookie(auth.COOKIE_NAME, auth.make_session(), max_age=auth.SESSION_TTL,
+                        httponly=True, samesite="lax",
+                        secure=request.url.scheme == "https"
+                        or request.headers.get("x-forwarded-proto") == "https")
+        return resp
 
     @app.middleware("http")
     async def timing(request: Request, call_next):

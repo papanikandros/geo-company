@@ -1,10 +1,11 @@
 # geoextract served map + API.
 #
-# TLS, hostnames and the outer basic-auth live in the SHARED Caddy stack on the
-# server (~/Workspace/server-proxy → /opt/proxy), which reaches this API over the
-# external docker network "proxy" under the alias "geo-api" and serves
-# data/serve/<SCOPE>/current/ as static files itself (PMTiles need HTTP Range).
-# Locally the API serves the page and the data on its own — no Caddy needed.
+# TLS and hostnames live in the SHARED Caddy stack on the server
+# (~/Workspace/server-proxy → /opt/proxy), which reaches this API over the external
+# docker network "proxy" under the alias "geo-api" and serves data/serve/<SCOPE>/current/
+# as static files itself (PMTiles need HTTP Range). Access control is the API's own
+# login page (serve/auth.py, GEOEXTRACT_WEB_PASSWORD in .env) — the proxy's basic_auth
+# was dropped 2026-09-28. Locally the API serves the page and the data on its own.
 #
 #   laptop:  SCOPE=bremen docker compose up -d      → http://localhost:8791/
 #   server:  docker compose up -d                   (proxy stack must be up: it owns the network)
@@ -17,6 +18,9 @@ x-common: &common
     context: .
     target: ${IMAGE_TARGET:-runtime}   # "full" adds tippecanoe for the builder profile
   image: geoextract:${IMAGE_TARGET:-runtime}
+  env_file:
+    - path: .env          # GEOEXTRACT_WEB_PASSWORD + GEOEXTRACT_WEB_SECRET (login gate)
+      required: false     # absent locally → gate off, see serve/auth.py
   environment:
     GEOEXTRACT_DATA_DIR: /data
   volumes:

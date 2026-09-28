@@ -396,6 +396,23 @@ needs its own go with the volume stated first (golden rule 3).
          un-geocoded sites); card shows each potential + a 12-bar profile; e-mail dropped.
          Data caveat: the sheet says kW, but ~3 265 reporters entered monthly kWh (12 values
          sum to the yearly figure) — passed through unchanged.
+   - [x] **Verbatim source rows in the raw record — DONE 2026-09-24 (user decision: every
+         field of every merged datapoint visible on the card and in the parquet + sources
+         download):** audit found the nested raw records were the ADAPTER rows (contract +
+         debug columns), not the source rows — IED kept 17 of 52 columns, MaStR units only
+         their capacity fields, the register only current values. `rawrecords.py` +
+         `geoextract raw build --sources ied,mastr,register` write `src_<source>/<source>_raw_DE.parquet`
+         / `register/register_raw.parquet` (`id, record, key, fields MAP<text,text>`, values
+         verbatim as text, empty cells dropped) from the LOCAL raw files; the serve build nests
+         them as `raw` in each source / register record; the card renders them grouped by
+         record kind. DE: IED 112 282 rows (all report years, 14 700 installations); MaStR
+         569 999 records for 102 382 sites (units + EEG/KWK/permit/storage plant + operator +
+         location + grid connections); register 1 695 625 records for the referenced hr_ids
+         (hr2022 with full name/address/objective/capital histories, hr2019 records + previous
+         names, GLEIF full rows). Officers stay out (spec rule, GDPR). Still selective, need
+         network + a go: Overture (re-pull with all columns: alternate names/categories,
+         socials, all websites/e-mails/phones, sources, version) and Wikidata (wider property
+         list). OSM (`osm_tags`) and PfA (potentials) were already complete.
 10. **Later: deployment of the merged table to Cloudflare KV** (user idea 2026-09-04) — serve
    the company data from an edge key-value store so the map/API reads are ultra fast.
    Think through first: key design (per company id vs. per grid cell / district tiles),
