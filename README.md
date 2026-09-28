@@ -155,8 +155,10 @@ address out for fifteen minutes, whether they came from the form or from a token
 On a server the API runs behind the **shared Caddy stack** (`~/Workspace/server-proxy`,
 deployed to `/opt/proxy`), which owns 80/443 for every app on the box, terminates TLS,
 and serves `data/serve/<SCOPE>/current/` as static files
-(PMTiles need HTTP Range). This compose file only runs the API; it joins the external
-docker network `proxy` as `geo-api`.
+(PMTiles need HTTP Range) — but only after asking the API's `/auth` route
+(`forward_auth`), so the static data is behind the same login gate as the map and the
+interface. This compose file only runs the API; it joins the external docker network
+`proxy` as `geo-api`.
 
 ```bash
 # once, on the server: the builder needs tippecanoe compiled in

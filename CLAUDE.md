@@ -109,7 +109,8 @@ business emails only (GDPR).
 ## Status snapshot (2026-09-04 — details in Claude's project memory)
 
 - **Item 6 (register + website) DONE for DE 2026-09-20; served DE map live on badserver1**
-  (`companies.91-99-7-130.sslip.io`, basic auth, `GEO_SCOPE=DE`): 9 GB version, tiles
+  (`companies.bestdomaininthesolarsystem.com`, single-password login gate incl. the static
+  data via Caddy `forward_auth` → `/auth`, 2026-09-28; `GEO_SCOPE=DE`): 9 GB version, tiles
   2 906 MB complete from z12 (2026-09-22), 4 139 625 points + 1 355 820 register companies +
   601 034 site polygons; PfA potentials nested in the full tier. Push: `PUSH_BUILT=1
   scripts/serve_push.sh badserver1:/opt/geo-company DE` then restart the api container.
